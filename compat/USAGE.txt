@@ -1,0 +1,41 @@
+兼容模块（源码版 1.0.7，不是新发布包）
+
+分层：
+  engine2/main.cpp：并发文件服务、状态保持、读写/截断/原子替换、内核回写。
+  engine2_view.hpp：可选版本控制进程视图，独立于文件服务和加密算法。
+  registry.py：模块选择及原始视图规则；不包含加解密算法。
+  program_view.h：按 registry 提供的规则选择请求视图，核心不维护程序名清单。
+  textconv.py / textconv_native.c：原 301 格式的只读显示转换，不改变输入或索引。
+  git.py：Git 本地显示属性、原始密文对象识别及无明文的对象头分类缓存。
+  manager.py：后台发现仓库、索引变化后刷新补丁；不阻塞挂载读写。
+
+已验证的 Git 功能：
+  git status / add / commit / checkout / restore 使用磁盘原始状态，密文仍为 301。
+  diff / diff --cached / show 提交号 / log -p 显示明文差异。
+  show --textconv HEAD:路径、blame --textconv 显示历史明文与行归属。
+  show HEAD:路径 默认仍是原始对象字节；cat-file、打包与推送保持密文。
+  只在 .git/config、.git/info 写入本地配置，不修改跟踪文件和索引。
+  不设置 clean/smudge，不缓存明文到 notes。已有自定义 diff 规则跳过并保留。
+
+自动配置范围：
+  自动监控挂载就绪后，后台发现监控目录本身及两层子目录中的 Git 仓库。
+  新仓库每 30 秒重新发现；索引目录通过 inotify 监听原子替换事件，变化后刷新显示属性。
+  空闲时不逐仓库轮询属性，每 60 秒轻量校验；无法监听的仓库每 5 秒检查一次。
+  后台配置任务采用 nice +10、空闲磁盘 I/O 优先级，不设置额外内存上限。
+  同时只运行一个配置任务，超时/启动失败会退避重试，不中断文件服务。
+  初次识别读取索引对象；后续复用“对象 ID -> 是否密文”缓存，不缓存源码内容。
+  原来是明文的 Git 对象保持明文。操作失败会记录到监控日志，并稍后重试。
+  更深层的仓库可将其父目录单独加入监控，或手动运行一次配置命令。
+
+手动源码调试（无需打包）：
+  python3 compat_cli.py git-configure /path/repo --config-dir /path/config
+  python3 compat_cli.py textconv --config-dir /path/config /path/history-cipher.java
+
+SVN / Mercurial：
+  当前模块仅提供磁盘原始视图，已验证提交和还原保持密文；
+  它们的明文对比、历史内容和行归属显示尚未实现，不能视作全功能兼容。
+
+边界：
+  当前 Git 补丁不自动合并加密源码的文本冲突。显示用差异不能当作明文补丁直接应用。
+  内置 Git 库、绕过外部 git 的图形客户端，以及不使用 textconv 的命令需单独接入。
+  特殊补丁的新增和修复应集中在 compat，不继续在核心堆积软件名称判断。

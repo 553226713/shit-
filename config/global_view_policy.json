@@ -1,0 +1,8 @@
+{
+  "file_patterns": ["*"],
+  "write_mode": "preserve_existing_file_state",
+  "system_read_only": ["/usr", "/etc", "/boot", "/opt", "/var", "/srv", "/snap", "/root", "/lost+found"],
+  "system_passthrough": ["/dev", "/proc", "/sys", "/run", "/tmp", "/var/tmp"],
+  "user_passthrough": [".cache", ".config", ".local", ".ssh", ".gnupg", ".pki", ".npm", ".m2", ".gradle", ".cargo", ".rustup", ".conda", ".nvm", ".vscode", ".zed", ".codex", ".docker", ".mozilla", ".kube", ".nuget", ".dotnet", ".sdkman", ".gem", ".anthropic", ".vscode-server", ".vscode-remote", ".bun", ".yarn", ".pnpm-store", ".gradle-cache", "公共", "Public"],
+  "precedence": "System/shared/application-state passthrough takes precedence over encryption file patterns; symlink aliases use the protected target."
+}

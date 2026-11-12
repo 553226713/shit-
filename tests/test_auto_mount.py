@@ -1,0 +1,105 @@
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+from unittest.mock import Mock, patch
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+import auto_mount
+
+
+class AutoMountTests(unittest.TestCase):
+    def test_missing_directory_does_not_exclude_available_directory(self):
+        with tempfile.TemporaryDirectory() as directory:
+            good = Path(directory) / 'good'; good.mkdir()
+            missing = Path(directory) / 'missing'
+            skipped = {}
+            selected = auto_mount.top_level_directories({'directories': [
+                {'path': str(missing), 'enabled': True},
+                {'path': str(good), 'enabled': True},
+            ]}, skipped)
+            self.assertEqual(selected, [good])
+            self.assertEqual(skipped[str(missing)], '目录不存在')
+
+    def test_effective_access_not_directory_owner_controls_selection(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path=Path(directory)/'data';path.mkdir()
+            effective={'directories':[{'path':str(path),'enabled':True}]}
+            for allowed in (True, False):
+                with self.subTest(allowed=allowed), patch.object(auto_mount.os,'access',return_value=allowed) as access:
+                    skipped={};result=auto_mount.top_level_directories(effective,skipped)
+                    self.assertEqual(result,[path] if allowed else [])
+                    access.assert_called_once_with(path,auto_mount.os.R_OK|auto_mount.os.W_OK|auto_mount.os.X_OK,effective_ids=True)
+                    if not allowed:self.assertIn('权限',skipped[str(path)])
+
+    def test_broker_isolates_mount_failure_and_exited_process(self):
+        from contextlib import ExitStack
+        for exited in (False, True):
+            with self.subTest(exited=exited), tempfile.TemporaryDirectory() as directory, ExitStack() as stack:
+                state = Path(directory)
+                effective = {'directories': []}
+                bad, good = Path('/bad'), Path('/good')
+                healthy = Mock(origin=good); healthy.process.poll.return_value = None
+                failed = Mock(origin=bad); failed.process.poll.return_value = 1
+                handlers = {}
+                def signal_handler(sig, callback):
+                    handlers[sig] = callback
+                def sleep(_seconds):
+                    handlers[auto_mount.signal.SIGTERM]()
+                patches = [
+                    patch.object(auto_mount, 'STATE', state),
+                    patch.object(auto_mount, 'LOG', state / 'log'),
+                    patch.object(auto_mount.yt_config, 'load_settings', return_value={}),
+                    patch.object(auto_mount.yt_config, 'load_remote_policy', return_value={}),
+                    patch.object(auto_mount.yt_config, 'effective_config', return_value=effective),
+                    patch.object(auto_mount, 'top_level_directories', return_value=[bad, good]),
+                    patch.dict(auto_mount.os.environ, {'SUDO_UID': '1000', 'SUDO_GID': '1000'}),
+                    patch.object(auto_mount.os, 'chown'),
+                    patch.object(auto_mount.os, 'getgrouplist', return_value=[1000]),
+                    patch.object(auto_mount.signal, 'signal', side_effect=signal_handler),
+                    patch.object(auto_mount.time, 'sleep', side_effect=sleep),
+                    patch.object(auto_mount.yt_config, 'read_json', return_value={}),
+                    patch.object(auto_mount, 'open_mount', side_effect=[failed if exited else OSError('missing'), healthy]),
+                ]
+                for mocked in patches:
+                    stack.enter_context(mocked)
+                status = stack.enter_context(patch.object(auto_mount, 'write_status'))
+                stack.enter_context(patch.object(auto_mount, 'close_mount'))
+                self.assertEqual(auto_mount.run_broker(), 0)
+                payloads = [call.args[0] for call in status.call_args_list]
+                self.assertTrue(any(p.get('mounts') == ['/good'] and '/bad' in p.get('skipped', {}) for p in payloads))
+                self.assertFalse(any(p['state'] == 'failed' for p in payloads))
+
+    def test_recovery_only_recognizes_this_clients_fuse_mount(self):
+        with patch.object(Path, 'is_dir', return_value=True), patch.object(Path, 'read_text', return_value='1 2 0:1 / /project rw - fuse sgfs rw\n'):
+            self.assertTrue(auto_mount.disconnected_client_mount(Path('/project')))
+        with patch.object(Path, 'is_dir', return_value=True), patch.object(Path, 'read_text', return_value='1 2 0:1 / /project rw - fuse other rw\n'):
+            self.assertFalse(auto_mount.disconnected_client_mount(Path('/project')))
+
+    def test_no_directories_waits_without_failed_service_or_sudo(self):
+        with patch.object(auto_mount, 'prepare_runtime', return_value=({'directories': []}, [], 1000, 1000, [])), patch.object(auto_mount, 'write_status') as status, patch.object(auto_mount.time, 'sleep', side_effect=KeyboardInterrupt), patch.object(auto_mount.os, 'execvpe') as execute:
+            with self.assertRaises(KeyboardInterrupt):
+                auto_mount.main()
+            self.assertEqual(status.call_args.args[0]['state'], 'idle')
+            self.assertIsNone(status.call_args.args[0]['error'])
+            execute.assert_not_called()
+
+    def test_bind_mount_source_does_not_count_as_mounted_target(self):
+        with patch.object(Path, 'read_text', return_value='1 2 0:1 /project /backing rw - ext4 disk rw\n'):
+            self.assertFalse(auto_mount.is_mounted(Path('/project')))
+            self.assertTrue(auto_mount.is_mounted(Path('/backing')))
+
+    def test_fuse_startup_failure_unmounts_both_views(self):
+        with tempfile.TemporaryDirectory() as directory:
+            origin = Path(directory) / 'project'; origin.mkdir()
+            process = Mock(); process.poll.return_value = 1
+            with patch.object(auto_mount, 'STATE', Path(directory) / 'state'), patch.object(auto_mount, 'mount'), patch.object(auto_mount, 'is_mounted', return_value=False), patch.object(auto_mount.os, 'chown'), patch.object(auto_mount.os, 'open', side_effect=[41,42]), patch.object(auto_mount.os,'readlink',return_value=str(origin)), patch.object(auto_mount.os,'access',return_value=True), patch.object(auto_mount.os, 'close') as close, patch.object(auto_mount.subprocess, 'Popen', return_value=process), patch.object(auto_mount.LIBC, 'umount2') as unmount:
+                with self.assertRaisesRegex(RuntimeError, 'FUSE 进程提前退出'):
+                    auto_mount.open_mount(origin, 1000, 1000, [])
+                self.assertEqual(unmount.call_count, 2)
+                self.assertEqual(unmount.call_args_list[0].args, (b'/proc/self/fd/41', 2))
+                self.assertCountEqual([call.args[0] for call in close.call_args_list],[41,42])
+
+
+if __name__ == '__main__':
+    unittest.main()

@@ -1,0 +1,9 @@
+# Local device configuration, policy keys, runtime data and mounted backings.
+/state/
+/config/*
+!/config/policy.example.json
+!/config/global_view_policy.json
+__pycache__/
+*.py[cod]
+# Workstation-specific live verification; reusable tests remain tracked.
+/engine2/verify_live.py

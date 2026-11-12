@@ -1,0 +1,11 @@
+{
+  "linux_component_sha256": "346cbbc0c18c19eca37b33ee64be408e1517e54386b9f972e6fbad682e6a608a",
+  "windows_component_sha256": "548724986e4558c855832379661fec425954ab82ec5951b5978477bce49376b0",
+  "cipher301": {
+    "sha256": "0c466696ba5bbe4e7d6b858d2ebb612699bae2d0ff3a5de63bcfe9dbaf3f58e0",
+    "source_start": 4222970,
+    "source_end": 4226831,
+    "architecture": "x86_64",
+    "context_bytes": 5280
+  }
+}

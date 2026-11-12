@@ -1,0 +1,20 @@
+{
+  "schema": 1,
+  "server": "policy.example.invalid",
+  "updated_at": "2026-11-11T12:00:00+08:00",
+  "encryption_key": "server-issued-key",
+  "file_patterns": [
+    "*.java"
+  ],
+  "trusted_programs": [
+    "zed",
+    "zed-editor",
+    "*/zed",
+    "*/zed-editor",
+    "*java*",
+    "*javac*"
+  ],
+  "directories": [
+    "/home/example/project"
+  ]
+}

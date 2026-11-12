@@ -1,0 +1,64 @@
+Engine 2 — local C++ FUSE engine (application version remains 1.0.7)
+
+Source and installed builds use only this engine; the old engine, callback patcher and executable backups were deleted.
+The original vendor filesystem executable was replaced by a hash-verified 3861
+byte arithmetic capsule (vendor/cipher301.bin), preserving only format 301 math.
+
+Build:
+  python3 linux-client/engine2/build.py
+  python3 linux-client/engine2/build.py --textconv
+Requires x86_64, a C++20 compiler, libfuse >=3.18 headers and runtime. The builder
+uses state/toolchain/fuse3 if system headers are not installed. Packaged runtimes verify precompiled components and execute them directly from
+the installation vendor directory. Runtime compilation/copying is not used.
+The mutable monitor directory holds only policy, logs, status and backing mounts;
+it can reside on a noexec filesystem. Policy paths are explicit launcher inputs,
+independent of executable paths. The source build uses state/engine2 for artifacts.
+
+Run manually with the source monitor stopped:
+  python3 linux-client/auto_mount.py
+Or restart the existing source service:
+  systemctl --user restart ytsysconfig-auto.service
+No engine selector or legacy fallback remains. Git display uses the separate
+streaming adapter; it contains no filesystem/mount code.
+
+Design:
+Plain/excluded files use kernel passthrough for data I/O whenever possible.
+Only a scoped file with a matching signature enters the encrypted path.
+Signature classification is cached by inode size/mtime/ctime, never plaintext.
+Raw and decoded views use different FUSE inode IDs, preventing mmap cache mixing.
+Program-name patterns match basenames; only explicit path patterns match paths.
+This prevents a cargo directory from implicitly authorizing unrelated utilities.
+A file's original 301 header is preserved. New and existing plain files stay plain.
+Cipher tables initialize once; mutable stream contexts are thread-local.
+Independent files run concurrently. An inode's writes/append/truncation serialize.
+Lookup and open references govern descriptor/node lifetime. There is no added
+address-space/memory limit or Git mapping-window limit. Open-file soft limits
+are raised to the existing hard limit for large repositories.
+Root privilege is retained for kernel passthrough registration; request fsuid/
+fsgid and kernel default_permissions enforce backing access. Only the configured
+user and root requests are accepted. Privileged signature inspection does not
+provide file contents to clients lacking read permission.
+
+Verification (disposable mounts; source repositories remain untouched):
+  python3 linux-client/engine2/verify.py
+  python3 linux-client/engine2/benchmark.py --repeat 3
+The old engine comparison uses the recorded pre-removal baseline report; it
+does not retain or execute the removed engine.
+  python3 linux-client/tests/verify_uniform_io.py ...
+  python3 linux-client/tests/verify_git_roundtrip.py ...
+  python3 linux-client/tests/verify_scope_and_vcs.py ...
+Read reports in state/engine2/. Git tests use a disposable local bare remote by
+default. server-roundtrip.json records the explicit real-server push/fetch test. Original Windows
+DLL emulation verifies random offsets against newly written ciphertext.
+
+Limits:
+Zed UI responsiveness is tested by the user; parallel scanning is a surrogate,
+not a claim that a real Zed multi-project run has passed. Metadata still passes
+through FUSE. Per-inode state and descriptors grow with the kernel inode cache.
+Encrypted/plain replacement conversion supports ordinary sibling editor saves;
+cross-directory conversion, exchange and multiply-linked conversion are rejected
+before mutation. File data and basic mode are preserved by conversion; arbitrary
+source xattrs/ACLs are not copied by that conversion path. Advanced fallocate,
+copy_file_range and ioctl operations may require caller fallback. Git's existing
+read-only display adapter remains separate from core encryption. SVN/Hg tests
+cover encrypted storage and restore, not plaintext history display or merges.
