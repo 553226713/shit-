@@ -7,3 +7,6 @@ __pycache__/
 *.py[cod]
 # Workstation-specific live verification; reusable tests remain tracked.
 /engine2/verify_live.py
+
+# Original native client resources are supplied separately for local builds.
+/vendor/native-client/

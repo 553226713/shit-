@@ -2,9 +2,8 @@
 Type=Application
 Name=shit加密
 Comment=shit加密配置与自动监控
-Exec=/home/wangwg/桌面/other/YTSysConfig/linux-client/start.sh
-Path=/home/wangwg/桌面/other/YTSysConfig/linux-client
-Icon=/home/wangwg/桌面/other/YTSysConfig/linux-client/assets/hicolor/scalable/apps/ytsysconfig.svg
+Exec=/usr/bin/shit-encryption
+Icon=ytsysconfig
 Terminal=false
 Categories=System;Security;
 StartupNotify=true

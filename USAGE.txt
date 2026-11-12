@@ -8,8 +8,7 @@ Linux 原生加解密隔离启动器
   /dev/fuse 和现有 sudo 授权仍需系统提供，安装软件包不会修改权限策略。
   start.sh 默认后台启动并立即返回，不占用终端；调试时使用 start.sh --foreground。
   窗口关闭和最小化按钮会隐藏配置窗口，后台监控继续运行；托盘双击或菜单可重新打开。
-  可把同目录的 com.yangtu.ytconfig.control.desktop 安装到
-  ~/.local/share/applications/ 后从应用菜单启动。
+  安装包会安装 com.yangtu.ytconfig.control.desktop 桌面入口；源码开发直接运行 start.sh。
 
 配置中心提供三个页面：
   概览：查看自动监控、引擎和策略状态，控制监控启停，并选择监控目录。
@@ -138,13 +137,12 @@ GNOME 顶部状态栏会显示盾牌托盘图标；左键重新打开窗口，�
 目录组织（当前目录可整体搬移，运行代码不依赖外层 analysis）：
   压缩源码：sh packaging/archive-source.sh
   默认生成 ../linux-client-source.tar.gz，也可将输出路径作为第一个参数传入。
-  打包跳过 state/、.git/ 和 Python 缓存，避免受保护的挂载目录及 socket 导致失败。
-  压缩包保留 config/ 中的本机配置和策略，仅供私下备份或迁移，不宜公开分发；
-  不包含运行数据及本地构建产物，目标机器需重新构建并满足下述依赖。
+  从 Git HEAD 导出已提交源码，不包含未提交修改、本机配置、策略密钥、运行数据或构建产物。
+  此操作需要 Git 仓库；目标机器需重新构建并满足下述依赖。
   yt_run.py、namespace_view.py：程序启动与隔离文件视图。
   engine2/build.py、engine2/main.cpp：原生并发文件引擎构建代码。
   config/：监控目录及当前服务器下发的加密标识、进程规则。
-  vendor/：固定版本的原生 sgfs 及组件 SHA256 清单。
+  vendor/：301 算法组件及其 SHA256 清单，原生文件服务已移除。
   state/：运行生成的程序、会话记录、日志、Zed 数据与最新验证结果。
   原生服务器策略优先查找 vendor/native-client 或已安装的 /opt/apps 客户端；
   当前开发机也可从外层归档的原生客户端运行目录读取。

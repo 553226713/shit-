@@ -13,10 +13,10 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from engine2.build import build
 from windows_policy import NATIVE_SHA256
+from yt_config import discover_native_client
 
 VERSION = (ROOT / 'VERSION').read_text(encoding='utf-8').strip()
 OUTPUT = ROOT.parent / 'dist'
-NATIVE = ROOT.parent / 'linux-client-archive/research/linux_runtime/files/bin/svchost'
 MODULES = ['runtime_paths.py', 'yt_control.py', 'yt_config.py', 'system_tray.py',
            'auto_mount.py', 'auto_service.py', 'namespace_view.py', 'broker_control.py',
            'windows_policy.py', 'file_scope.py', 'error_log.py',
@@ -32,7 +32,8 @@ def write(path, content, mode=0o644):
 def main():
     if os.uname().machine != 'x86_64':
         raise SystemExit('This native engine requires an amd64 build host.')
-    if hashlib.sha256(NATIVE.read_bytes()).hexdigest() != NATIVE_SHA256:
+    native = discover_native_client() / 'files/bin/svchost'
+    if hashlib.sha256(native.read_bytes()).hexdigest() != NATIVE_SHA256:
         raise SystemExit('Native client hash does not match the reviewed version.')
     OUTPUT.mkdir(exist_ok=True)
     with tempfile.TemporaryDirectory(prefix='shit-encryption-deb-') as temporary:
@@ -71,9 +72,9 @@ def main():
                         str(ROOT / 'windows_policy.cpp'), '-o', str(vendor / 'windows-policy.so')], check=True)
         subprocess.run(['strip','--strip-unneeded',str(vendor/'windows-policy.so')],check=True)
         native_bin = vendor / 'native-client/files/bin'; native_bin.mkdir(parents=True)
-        shutil.copy2(NATIVE, native_bin / 'svchost')
+        shutil.copy2(native, native_bin / 'svchost')
         (native_bin / 'svchost').chmod(0o755)
-        shutil.copy2(NATIVE.parent / 'dotimer.sh', native_bin / 'dotimer.sh')
+        shutil.copy2(native.parent / 'dotimer.sh', native_bin / 'dotimer.sh')
         write(native_bin / 'local.ini', '[ytstatus]\nversion=2025.02.06\n')
         for source, target in [('start-installed.sh', 'start.sh'), ('mount-broker', 'mount-broker')]:
             shutil.copy2(ROOT / 'packaging' / source, app / target)
