@@ -42,6 +42,18 @@ def verify(args):
         assert after['read_callbacks']==before['read_callbacks']
         assert after['write_callbacks']==before['write_callbacks']
         result['plain_400_opens_no_userspace_data_callbacks']=True
+        transition = project/'Transition.java'
+        transition.write_bytes(b'ordinary plaintext content ' * 4)
+        for _ in range(20):
+            assert transition.stat().st_size == 108
+        # Change through the raw backing descriptor to bypass FUSE write-side
+        # invalidation. The metadata fast path must notice the new signature.
+        fd=os.open(transition.name,os.O_WRONLY|os.O_TRUNC,dir_fd=raw_fd)
+        with os.fdopen(fd,'wb') as stream:stream.write(raw)
+        assert transition.read_bytes()==(project/'Cipher0.java').read_bytes()
+        assert raw_mmap(transition)==raw
+        assert transition.stat().st_size==len(raw)-1024
+        result['metadata_cache_detects_plain_to_cipher_transition']=True
         cipher=project/'Cipher0.java'; original=cipher.read_bytes()
         with cipher.open('r+b',buffering=0) as stream:
             with mmap.mmap(stream.fileno(),0) as decoded:

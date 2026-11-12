@@ -77,3 +77,13 @@ cause of any remote crash without its logs, nor add automatic crash recovery.
 
 The broker releases its duplicate /dev/fuse descriptor after worker startup,
 so a dead worker aborts outstanding requests rather than leaving them hung.
+
+Metadata scanning optimization (version remains 1.0.8):
+Regular files keep zero-timeout lookup validation for per-process views and
+atomic saves that replace an unscoped temporary file's backing inode.
+Unchanged plaintext metadata reuses its inode state after backing fstatat and
+size/mtime/ctime checks, avoiding descriptor reopen/eviction cycles. Metadata
+lookup returns its existing stat rather than repeating fstat/classification.
+  python3 linux-client/engine2/benchmark_metadata.py --before OLD_ENGINE
+verify.py also checks plaintext changed to ciphertext through a raw backing
+descriptor, so cached classification cannot hide an encryption transition.

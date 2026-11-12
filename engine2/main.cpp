@@ -390,6 +390,42 @@ struct Engine {
         auto dir = get(parent);
         if (!dir)
             return ESTALE;
+        auto relative = path(dir) + "/" + name;
+        bool scoped = policy.scoped(relative);
+        struct stat current{};
+        if (fstatat(dir->fd, name, &current, AT_SYMLINK_NOFOLLOW))
+            return errno;
+        {
+            std::lock_guard g(nodes_lock);
+            sweep();
+            auto found = identity.find({current.st_dev, current.st_ino, 0});
+            if (found != identity.end()) {
+                auto n = nodes.at(found->second);
+                std::lock_guard cache(n->storage->cache);
+                auto &stamp = n->storage->stamp;
+                bool unchanged_plain = n->storage->classified && n->storage->state == 0 &&
+                    stamp.size == current.st_size &&
+                    stamp.modified.tv_sec == current.st_mtim.tv_sec &&
+                    stamp.modified.tv_nsec == current.st_mtim.tv_nsec &&
+                    stamp.changed.tv_sec == current.st_ctim.tv_sec &&
+                    stamp.changed.tv_nsec == current.st_ctim.tv_nsec;
+                // Revalidate the backing inode and timestamps, but do not open
+                // a descriptor just to report unchanged plaintext metadata.
+                // Scope/path equality prevents hardlinks crossing scope rules
+                // from borrowing another path's plaintext classification.
+                if (n->path == relative && !n->retired &&
+                    (!S_ISREG(current.st_mode) || !scoped || current.st_size < 32 || unchanged_plain)) {
+                    n->refs++;
+                    entry = {};
+                    entry.ino = n->ino;
+                    entry.generation = 1;
+                    entry.attr = current;
+                    entry.entry_timeout = S_ISREG(current.st_mode) ? 0 : 1;
+                    entry.attr_timeout = 1;
+                    return 0;
+                }
+            }
+        }
         {
             std::lock_guard g(nodes_lock);
             trim_fds(fd_budget > 16 ? fd_budget - 16 : 0);
@@ -403,7 +439,7 @@ struct Engine {
             close(fd);
             return error;
         }
-        auto candidate = std::make_shared<Node>(fd, 0, path(dir) + "/" + name);
+        auto candidate = std::make_shared<Node>(fd, 0, relative);
         candidate->storage = storage(st);
         int enc = classify(candidate, st);
         candidate->view = enc ? (decoded(req, candidate) ? 1 : 2) : 0;
@@ -411,13 +447,14 @@ struct Engine {
         entry = {};
         entry.ino = n->ino;
         entry.generation = 1;
-        int error = attributes(req, n, entry.attr);
-        if (error) {
-            forget(n->ino, 1);
-            return error;
-        }
-        // Regular dentries revalidate so a rename or Git checkout can change
-        // encryption state/view without reusing another view's kernel cache.
+        // The descriptor and stat above already describe this lookup. Repeating
+        // fstat/classification here doubles metadata work during IDE scans.
+        entry.attr = st;
+        if (enc == 1 && n->view == 1)
+            entry.attr.st_size = std::max<off_t>(0, st.st_size - 1024);
+        // Regular dentries must revalidate, including out-of-scope temporary
+        // files: rename preservation can replace their backing inode when an
+        // editor saves over a ciphertext target.
         entry.entry_timeout = S_ISREG(st.st_mode) ? 0 : 1;
         entry.attr_timeout = enc == 0 ? 1 : 0;
         return 0;
