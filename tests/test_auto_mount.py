@@ -40,7 +40,7 @@ class AutoMountTests(unittest.TestCase):
                 effective = {'directories': []}
                 bad, good = Path('/bad'), Path('/good')
                 healthy = Mock(origin=good); healthy.process.poll.return_value = None
-                failed = Mock(origin=bad); failed.process.poll.return_value = 1
+                failed = Mock(origin=bad,backing=state/'bad/backing'); failed.process.poll.return_value = 1
                 handlers = {}
                 def signal_handler(sig, callback):
                     handlers[sig] = callback
@@ -69,6 +69,22 @@ class AutoMountTests(unittest.TestCase):
                 payloads = [call.args[0] for call in status.call_args_list]
                 self.assertTrue(any(p.get('mounts') == ['/good'] and '/bad' in p.get('skipped', {}) for p in payloads))
                 self.assertFalse(any(p['state'] == 'failed' for p in payloads))
+
+    def test_compatibility_failure_does_not_exit_mount_broker(self):
+        import compat.manager
+        from contextlib import ExitStack
+        with tempfile.TemporaryDirectory() as temporary, ExitStack() as stack:
+            directory=Path(temporary);handlers={}
+            def sleep(_):handlers[auto_mount.signal.SIGTERM]()
+            for item in [patch.object(auto_mount,'STATE',directory),patch.object(auto_mount,'LOG',directory/'log'),
+                         patch.object(auto_mount.yt_config,'load_settings',return_value={}),patch.object(auto_mount.yt_config,'load_remote_policy',return_value={}),
+                         patch.object(auto_mount.yt_config,'effective_config',return_value={'directories':[]}),patch.object(auto_mount,'top_level_directories',return_value=[]),
+                         patch.dict(auto_mount.os.environ,{'SUDO_UID':'1000','SUDO_GID':'1000'}),patch.object(auto_mount.os,'chown'),
+                         patch.object(auto_mount.os,'getgrouplist',return_value=[1000]),patch.object(auto_mount.signal,'signal',side_effect=lambda sig,cb:handlers.update({sig:cb})),
+                         patch.object(auto_mount.time,'sleep',side_effect=sleep),patch.object(compat.manager.GitPatches,'tick',side_effect=OSError('watcher failure'))]:stack.enter_context(item)
+            status=stack.enter_context(patch.object(auto_mount,'write_status'))
+            self.assertEqual(auto_mount.run_broker(),0)
+            self.assertTrue(any('compatibility' in call.args[0] for call in status.call_args_list))
 
     def test_recovery_only_recognizes_this_clients_fuse_mount(self):
         with patch.object(Path, 'is_dir', return_value=True), patch.object(Path, 'read_text', return_value='1 2 0:1 / /project rw - fuse sgfs rw\n'):

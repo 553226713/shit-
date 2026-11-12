@@ -10,6 +10,8 @@
 #include <grp.h>
 #include <limits>
 #include <linux/fuse.h>
+#include <linux/openat2.h>
+#include <list>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -17,6 +19,7 @@
 #include <signal.h>
 #include <sys/file.h>
 #include <sys/fsuid.h>
+#include <sys/ioctl.h>
 #include <sys/prctl.h>
 #include <sys/resource.h>
 #include <sys/statvfs.h>
@@ -45,7 +48,10 @@ struct Cred {
 struct Storage {
     std::shared_mutex data;
     std::mutex cache;
-    struct stat stamp{};
+    struct Stamp {
+        off_t size = 0;
+        timespec modified{}, changed{};
+    } stamp;
     bool classified = false;
     int state = 0;
     int backing = 0;
@@ -54,6 +60,11 @@ struct Storage {
 };
 struct Node {
     int fd;
+    dev_t device = 0;
+    ino_t physical_ino = 0;
+    bool fd_cached = false;
+    bool retired = false;
+    std::list<fuse_ino_t>::iterator fd_position;
     fuse_ino_t ino;
     uint64_t refs = 0;
     std::string path;
@@ -61,12 +72,15 @@ struct Node {
     int view = 0; // 0 ordinary, 1 decoded, 2 ciphertext: separate kernel caches.
     std::shared_ptr<Storage> storage;
     Node(int f, fuse_ino_t i, std::string p) : fd(f), ino(i), path(std::move(p)) {}
-    ~Node() { close(fd); }
+    ~Node() {
+        if (fd >= 0)
+            close(fd);
+    }
 };
 struct Handle {
     int fd;
     std::shared_ptr<Node> node;
-    bool passthrough = false, authorized = false, raw = false, append = false;
+    bool passthrough = false, authorized = false, raw = false, append = false, writable = false;
     ~Handle() { close(fd); }
 };
 struct Directory {
@@ -83,13 +97,18 @@ struct Engine {
     Policy policy;
     Cipher301 cipher;
     std::mutex nodes_lock;
+    std::mutex namespace_lock;
     std::map<fuse_ino_t, std::shared_ptr<Node>> nodes;
     std::map<std::tuple<dev_t, ino_t, int>, fuse_ino_t> identity;
     std::deque<fuse_ino_t> garbage;
+    std::list<fuse_ino_t> fd_lru;
+    size_t fd_budget = 128;
+    uint64_t fd_evictions = 0, fd_reopens = 0;
     fuse_ino_t next = 2;
     bool passthrough = false, mmap = false;
     Counters stats;
     uid_t owner = 0;
+    int fuse_fd = -1;
     explicit Engine(const char *root, const char *config) : policy(config) {
         int fd = open(root, O_PATH | O_DIRECTORY | O_CLOEXEC);
         if (fd < 0)
@@ -99,14 +118,93 @@ struct Engine {
             throw std::runtime_error("backing stat failed");
         owner = root_stat.st_uid;
         auto n = std::make_shared<Node>(fd, 1, "");
+        n->device = root_stat.st_dev;
+        n->physical_ino = root_stat.st_ino;
         n->storage = std::make_shared<Storage>();
         n->refs = 1;
         nodes[1] = n;
+        rlimit limit{};
+        if (!getrlimit(RLIMIT_NOFILE, &limit))
+            fd_budget = std::max<size_t>(16, std::min<rlim_t>(4096, limit.rlim_cur / 4));
+    }
+    // Kernel inode references are not active userspace operations. Retain a
+    // bounded cache of their O_PATH descriptors, while preserving descriptors
+    // held by open handles and in-flight callbacks. No repository size limit.
+    void trim_fds(size_t target) {
+        auto attempts = fd_lru.size();
+        while (fd_lru.size() > target && attempts--) {
+            auto current = fd_lru.begin();
+            auto found = nodes.find(*current);
+            if (found == nodes.end()) {
+                fd_lru.erase(current);
+                continue;
+            }
+            auto &n = found->second;
+            if (n.use_count() != 1) {
+                fd_lru.splice(fd_lru.end(), fd_lru, current);
+                continue;
+            }
+            close(n->fd);
+            n->fd = -1;
+            n->fd_cached = false;
+            fd_lru.erase(current);
+            fd_evictions++;
+        }
+    }
+    void track_fd(const std::shared_ptr<Node> &n) {
+        if (n->ino == 1)
+            return;
+        if (n->fd_cached)
+            fd_lru.splice(fd_lru.end(), fd_lru, n->fd_position);
+        else {
+            fd_lru.push_back(n->ino);
+            n->fd_position = std::prev(fd_lru.end());
+            n->fd_cached = true;
+        }
+    }
+    bool ensure_fd(const std::shared_ptr<Node> &n) {
+        if (n->fd >= 0) {
+            track_fd(n);
+            return true;
+        }
+        if (n->retired) {
+            errno = ESTALE;
+            return false;
+        }
+        trim_fds(fd_budget - 1);
+        open_how how{};
+        how.flags = O_PATH | O_NOFOLLOW | O_CLOEXEC;
+        how.resolve = RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS;
+        auto relative = n->path.starts_with('/') ? n->path.substr(1) : n->path;
+        int fd = syscall(SYS_openat2, nodes.at(1)->fd, relative.c_str(), &how, sizeof(how));
+        if (fd < 0)
+            return false;
+        struct stat st{};
+        if (fstat(fd, &st) || st.st_dev != n->device || st.st_ino != n->physical_ino) {
+            close(fd);
+            errno = ESTALE;
+            return false;
+        }
+        n->fd = fd;
+        try {
+            track_fd(n);
+        } catch (...) {
+            close(fd);
+            n->fd = -1;
+            throw;
+        }
+        fd_reopens++;
+        return true;
     }
     std::shared_ptr<Node> get(fuse_ino_t ino) {
         std::lock_guard g(nodes_lock);
         auto it = nodes.find(ino);
-        return it == nodes.end() ? nullptr : it->second;
+        if (it == nodes.end())
+            return nullptr;
+        auto n = it->second;
+        if (!ensure_fd(n))
+            return nullptr;
+        return n;
     }
     std::string path(const std::shared_ptr<Node> &n) {
         std::lock_guard g(nodes_lock);
@@ -128,7 +226,15 @@ struct Engine {
         auto it = identity.find(key);
         if (it != identity.end()) {
             auto n = nodes.at(it->second);
+            if (n->fd < 0) {
+                n->fd = candidate->fd;
+                n->path = candidate->path;
+                candidate->fd = -1;
+                fd_reopens++;
+            }
+            track_fd(n);
             n->refs++;
+            trim_fds(fd_budget);
             return n;
         }
         // Another view may have arrived while the header was being inspected.
@@ -141,8 +247,18 @@ struct Engine {
         }
         candidate->ino = next++;
         candidate->refs = 1;
-        identity[key] = candidate->ino;
-        nodes[candidate->ino] = candidate;
+        candidate->device = st.st_dev;
+        candidate->physical_ino = st.st_ino;
+        nodes.emplace(candidate->ino, candidate);
+        try {
+            identity.emplace(key, candidate->ino);
+            track_fd(candidate);
+        } catch (...) {
+            identity.erase(key);
+            nodes.erase(candidate->ino);
+            throw;
+        }
+        trim_fds(fd_budget);
         return candidate;
     }
     void collect(const std::shared_ptr<Node> &n) {
@@ -155,10 +271,24 @@ struct Engine {
             }
             return;
         }
-        struct stat st{};
-        if (!fstat(n->fd, &st))
-            identity.erase({st.st_dev, st.st_ino, n->view});
+        auto mapped = identity.find({n->device, n->physical_ino, n->view});
+        if (mapped != identity.end() && mapped->second == n->ino)
+            identity.erase(mapped);
+        if (n->fd_cached) {
+            fd_lru.erase(n->fd_position);
+            n->fd_cached = false;
+        }
         nodes.erase(n->ino);
+    }
+    void retire_inode(const struct stat &st) {
+        std::lock_guard g(nodes_lock);
+        for (int view = 0; view < 3; view++) {
+            auto mapped = identity.find({st.st_dev, st.st_ino, view});
+            if (mapped == identity.end())
+                continue;
+            nodes.at(mapped->second)->retired = true;
+            identity.erase(mapped);
+        }
     }
     void sweep() {
         auto count = std::min<size_t>(16, garbage.size());
@@ -203,9 +333,9 @@ struct Engine {
             return 0;
         std::lock_guard g(n->storage->cache);
         auto &a = n->storage->stamp;
-        if (n->storage->classified && a.st_size == st.st_size &&
-            a.st_mtim.tv_sec == st.st_mtim.tv_sec && a.st_mtim.tv_nsec == st.st_mtim.tv_nsec &&
-            a.st_ctim.tv_sec == st.st_ctim.tv_sec && a.st_ctim.tv_nsec == st.st_ctim.tv_nsec)
+        if (n->storage->classified && a.size == st.st_size &&
+            a.modified.tv_sec == st.st_mtim.tv_sec && a.modified.tv_nsec == st.st_mtim.tv_nsec &&
+            a.changed.tv_sec == st.st_ctim.tv_sec && a.changed.tv_nsec == st.st_ctim.tv_nsec)
             return n->storage->state;
         bool owned = fd < 0 || (fcntl(fd, F_GETFL) & O_ACCMODE) == O_WRONLY;
         if (owned) {
@@ -231,7 +361,7 @@ struct Engine {
             close(fd);
         // Transient read/permission failures must never become a persistent class.
         if (state >= 0 || state == -EACCES || state == -EOPNOTSUPP) {
-            n->storage->stamp = st;
+            n->storage->stamp = {st.st_size, st.st_mtim, st.st_ctim};
             n->storage->state = state;
             n->storage->classified = true;
         }
@@ -260,6 +390,10 @@ struct Engine {
         auto dir = get(parent);
         if (!dir)
             return ESTALE;
+        {
+            std::lock_guard g(nodes_lock);
+            trim_fds(fd_budget > 16 ? fd_budget - 16 : 0);
+        }
         int fd = openat(dir->fd, name, O_PATH | O_NOFOLLOW | O_CLOEXEC);
         if (fd < 0)
             return errno;
@@ -296,11 +430,14 @@ struct Engine {
             "{\"passthrough_enabled\":%s,\"mmap_enabled\":%s,\"lookup\":%lu,\"getattr\":%lu,"
             "\"opens\":%lu,\"passthrough_opens\":%lu,\"read_callbacks\":%lu,\"write_callbacks\":%"
             "lu,"
-            "\"cipher_reads\":%lu,\"cipher_writes\":%lu,\"header_probes\":%lu,\"live_nodes\":%zu}",
+            "\"cipher_reads\":%lu,\"cipher_writes\":%lu,\"header_probes\":%lu,\"live_nodes\":%zu,"
+            "\"cached_node_fds\":%zu,\"fd_cache_budget\":%zu,\"fd_evictions\":%lu,\"fd_reopens\":%"
+            "lu}",
             passthrough ? "true" : "false", mmap ? "true" : "false", stats.lookup.load(),
             stats.getattr.load(), stats.opens.load(), stats.passthrough.load(), stats.reads.load(),
             stats.writes.load(), stats.cipher_reads.load(), stats.cipher_writes.load(),
-            stats.header_probes.load(), nodes.size());
+            stats.header_probes.load(), nodes.size(), fd_lru.size() + 1, fd_budget, fd_evictions,
+            fd_reopens);
         return result;
     }
     void metrics(const char *file) {
@@ -326,8 +463,40 @@ static void init(void *userdata, fuse_conn_info *c) {
     fuse_unset_feature_flag(c, FUSE_CAP_WRITEBACK_CACHE);
     // No readdirplus auto lookups: callers control lookup lifetime explicitly.
     fuse_unset_feature_flag(c, FUSE_CAP_READDIRPLUS_AUTO);
-    fprintf(stderr, "engine2: passthrough=%d direct_io_mmap=%d threads=%u\n", e.passthrough, e.mmap,
-            std::max(2u, std::min(16u, std::thread::hardware_concurrency())));
+    rlimit limit{};
+    getrlimit(RLIMIT_NOFILE, &limit);
+    fprintf(
+        stderr,
+        "engine2: pid=%ld passthrough=%d direct_io_mmap=%d threads=%u fd_cache=%zu nofile=%lu\n",
+        static_cast<long>(getpid()), e.passthrough, e.mmap,
+        std::max(2u, std::min(16u, std::thread::hardware_concurrency())), e.fd_budget,
+        static_cast<unsigned long>(limit.rlim_cur));
+}
+static void forget_safely(Engine &e, fuse_ino_t ino) noexcept {
+    try {
+        e.forget(ino, 1);
+    } catch (...) {
+        fprintf(stderr, "engine2: deferred lookup cleanup failed\n");
+    }
+}
+static void discard_handle(Engine &e, Handle *h) noexcept {
+    try {
+        if (h->writable)
+            e.invalidate(h->node);
+        if (h->passthrough) {
+            std::lock_guard g(h->node->storage->cache);
+            if (!--h->node->storage->passthrough_refs) {
+                uint32_t id = h->node->storage->backing;
+                ioctl(e.fuse_fd, FUSE_DEV_IOC_BACKING_CLOSE, &id);
+                h->node->storage->backing = 0;
+            }
+        }
+        auto ino = h->node->ino;
+        delete h;
+        e.collect(ino);
+    } catch (...) {
+        fprintf(stderr, "engine2: handle cleanup failed\n");
+    }
 }
 static void lookup(fuse_req_t r, fuse_ino_t parent, const char *name) {
     Cred c(r);
@@ -338,7 +507,7 @@ static void lookup(fuse_req_t r, fuse_ino_t parent, const char *name) {
     if (error)
         reply_error(r, error);
     else if (fuse_reply_entry(r, &out))
-        e.forget(out.ino, 1);
+        forget_safely(e, out.ino);
 }
 static void forget(fuse_req_t r, fuse_ino_t ino, uint64_t n) {
     engine(r).forget(ino, n);
@@ -489,6 +658,7 @@ static int open_handle(fuse_req_t r, const std::shared_ptr<Node> &n, fuse_file_i
     int flags = fi->flags & ~(O_TRUNC | O_APPEND | O_CREAT | O_EXCL | O_NOFOLLOW);
     h->node = n;
     h->append = fi->flags & O_APPEND;
+    h->writable = (fi->flags & O_ACCMODE) != O_RDONLY;
     if (state) {
         auto id = e.policy.identity(fuse_req_ctx(r)->pid);
         h->raw = id.raw;
@@ -548,8 +718,12 @@ static void open_file(fuse_req_t r, fuse_ino_t ino, fuse_file_info *fi) {
     int error = open_handle(r, n, fi);
     if (error)
         reply_error(r, error);
-    else
-        fuse_reply_open(r, fi);
+    else {
+        auto &e = engine(r);
+        auto h = handle(fi);
+        if (fuse_reply_open(r, fi))
+            discard_handle(e, h);
+    }
 }
 static bool authorized(fuse_req_t r, Handle *h) {
     return fuse_req_ctx(r)->pid == 0 ? h->authorized : engine(r).decoded(r, h->node);
@@ -641,17 +815,7 @@ static void write_file(fuse_req_t r, fuse_ino_t ino, const char *buf, size_t siz
         fuse_reply_write(r, size);
 }
 static void release(fuse_req_t r, fuse_ino_t ino, fuse_file_info *fi) {
-    auto h = handle(fi);
-    if (h->passthrough) {
-        std::lock_guard g(h->node->storage->cache);
-        if (!--h->node->storage->passthrough_refs) {
-            fuse_passthrough_close(r, h->node->storage->backing);
-            h->node->storage->backing = 0;
-        }
-    }
-    auto number = h->node->ino;
-    delete h;
-    engine(r).collect(number);
+    discard_handle(engine(r), handle(fi));
     reply_error(r, 0);
 }
 static void flush(fuse_req_t r, fuse_ino_t ino, fuse_file_info *fi) { reply_error(r, 0); }
@@ -661,6 +825,7 @@ static void fsync(fuse_req_t r, fuse_ino_t ino, int data, fuse_file_info *fi) {
 }
 static void create(fuse_req_t r, fuse_ino_t parent, const char *name, mode_t mode,
                    fuse_file_info *fi) {
+    std::lock_guard namespace_guard(engine(r).namespace_lock);
     Cred c(r);
     auto &e = engine(r);
     auto n = e.get(parent);
@@ -684,8 +849,13 @@ static void create(fuse_req_t r, fuse_ino_t parent, const char *name, mode_t mod
     if (error) {
         e.forget(entry.ino, 1);
         reply_error(r, error);
-    } else
-        fuse_reply_create(r, &entry, fi);
+    } else {
+        auto h = handle(fi);
+        if (fuse_reply_create(r, &entry, fi)) {
+            discard_handle(e, h);
+            forget_safely(e, entry.ino);
+        }
+    }
 }
 static void readlink(fuse_req_t r, fuse_ino_t ino) {
     Cred c(r);
@@ -704,6 +874,7 @@ static void readlink(fuse_req_t r, fuse_ino_t ino) {
     }
 }
 static void mkdir(fuse_req_t r, fuse_ino_t parent, const char *name, mode_t mode) {
+    std::lock_guard namespace_guard(engine(r).namespace_lock);
     Cred c(r);
     auto n = engine(r).get(parent);
     if (!n) {
@@ -716,6 +887,7 @@ static void mkdir(fuse_req_t r, fuse_ino_t parent, const char *name, mode_t mode
         lookup(r, parent, name);
 }
 static void mknod(fuse_req_t r, fuse_ino_t parent, const char *name, mode_t mode, dev_t dev) {
+    std::lock_guard namespace_guard(engine(r).namespace_lock);
     Cred c(r);
     auto n = engine(r).get(parent);
     if (!n) {
@@ -728,6 +900,7 @@ static void mknod(fuse_req_t r, fuse_ino_t parent, const char *name, mode_t mode
         lookup(r, parent, name);
 }
 static void symlink(fuse_req_t r, const char *link, fuse_ino_t parent, const char *name) {
+    std::lock_guard namespace_guard(engine(r).namespace_lock);
     Cred c(r);
     auto n = engine(r).get(parent);
     if (!n) {
@@ -739,17 +912,34 @@ static void symlink(fuse_req_t r, const char *link, fuse_ino_t parent, const cha
     else
         lookup(r, parent, name);
 }
-static void unlink(fuse_req_t r, fuse_ino_t parent, const char *name) {
+static void remove_entry(fuse_req_t r, fuse_ino_t parent, const char *name, int flags) {
     Cred c(r);
-    auto n = engine(r).get(parent);
-    reply_error(r, !n ? ESTALE : unlinkat(n->fd, name, 0) ? errno : 0);
+    auto &e = engine(r);
+    auto n = e.get(parent);
+    if (!n) {
+        reply_error(r, ESTALE);
+        return;
+    }
+    struct stat before{};
+    bool known = !fstatat(n->fd, name, &before, AT_SYMLINK_NOFOLLOW);
+    if (unlinkat(n->fd, name, flags)) {
+        reply_error(r, errno);
+        return;
+    }
+    if (known && (flags == AT_REMOVEDIR || before.st_nlink == 1))
+        e.retire_inode(before);
+    reply_error(r, 0);
+}
+static void unlink(fuse_req_t r, fuse_ino_t parent, const char *name) {
+    std::lock_guard namespace_guard(engine(r).namespace_lock);
+    remove_entry(r, parent, name, 0);
 }
 static void rmdir(fuse_req_t r, fuse_ino_t parent, const char *name) {
-    Cred c(r);
-    auto n = engine(r).get(parent);
-    reply_error(r, !n ? ESTALE : unlinkat(n->fd, name, AT_REMOVEDIR) ? errno : 0);
+    std::lock_guard namespace_guard(engine(r).namespace_lock);
+    remove_entry(r, parent, name, AT_REMOVEDIR);
 }
 static void link(fuse_req_t r, fuse_ino_t ino, fuse_ino_t parent, const char *name) {
+    std::lock_guard namespace_guard(engine(r).namespace_lock);
     Cred c(r);
     auto &e = engine(r);
     auto n = e.get(ino), p = e.get(parent);
@@ -900,6 +1090,7 @@ static int preserve_rename(Engine &e, fuse_req_t r, const std::shared_ptr<Node> 
 }
 static void rename(fuse_req_t r, fuse_ino_t parent, const char *name, fuse_ino_t newparent,
                    const char *target, unsigned flags) {
+    std::lock_guard namespace_guard(engine(r).namespace_lock);
     Cred c(r);
     auto &e = engine(r);
     auto p = e.get(parent), q = e.get(newparent);
@@ -908,12 +1099,29 @@ static void rename(fuse_req_t r, fuse_ino_t parent, const char *name, fuse_ino_t
         return;
     }
     auto oldpath = e.path(p) + "/" + name, newpath = e.path(q) + "/" + target;
+    struct stat old_source{}, old_target{};
+    bool source_known = !fstatat(p->fd, name, &old_source, AT_SYMLINK_NOFOLLOW);
+    bool target_known = !fstatat(q->fd, target, &old_target, AT_SYMLINK_NOFOLLOW);
     int error = preserve_rename(e, r, p, name, q, target, flags);
     if (!error) {
+        struct stat after{};
+        if (!(flags & RENAME_EXCHANGE) && !fstatat(q->fd, target, &after, AT_SYMLINK_NOFOLLOW)) {
+            if (target_known && (old_target.st_nlink == 1 || S_ISDIR(old_target.st_mode)) &&
+                (after.st_dev != old_target.st_dev || after.st_ino != old_target.st_ino))
+                e.retire_inode(old_target);
+            if (source_known && old_source.st_nlink == 1 &&
+                (after.st_dev != old_source.st_dev || after.st_ino != old_source.st_ino))
+                e.retire_inode(old_source);
+        }
         std::lock_guard g(e.nodes_lock);
         for (auto &[id, n] : e.nodes) {
             if (n->path == oldpath || n->path.starts_with(oldpath + "/")) {
                 n->path = newpath + n->path.substr(oldpath.size());
+                std::lock_guard cache(n->storage->cache);
+                n->storage->classified = false;
+            } else if ((flags & RENAME_EXCHANGE) &&
+                       (n->path == newpath || n->path.starts_with(newpath + "/"))) {
+                n->path = oldpath + n->path.substr(newpath.size());
                 std::lock_guard cache(n->storage->cache);
                 n->storage->classified = false;
             }
@@ -944,7 +1152,14 @@ static void opendir(fuse_req_t r, fuse_ino_t ino, fuse_file_info *fi) {
     auto d = new Directory{dir, n, {}};
     fi->fh = reinterpret_cast<uint64_t>(d);
     fi->cache_readdir = 1;
-    fuse_reply_open(r, fi);
+    if (fuse_reply_open(r, fi)) {
+        auto number = d->node->ino;
+        delete d;
+        try {
+            e.collect(number);
+        } catch (...) {
+        }
+    }
 }
 static void readdir(fuse_req_t r, fuse_ino_t ino, size_t size, off_t off, fuse_file_info *fi) {
     Cred c(r);
@@ -1055,6 +1270,36 @@ static void listxattr(fuse_req_t r, fuse_ino_t ino, size_t size) {
 static void flock(fuse_req_t r, fuse_ino_t ino, fuse_file_info *fi, int op) {
     reply_error(r, ::flock(handle(fi)->fd, op) ? errno : 0);
 }
+template <typename Signature, Signature Function, bool NoReply = false> struct Guard;
+template <typename... Args, void (*Function)(fuse_req_t, Args...), bool NoReply>
+struct Guard<void (*)(fuse_req_t, Args...), Function, NoReply> {
+    static void call(fuse_req_t request, Args... args) noexcept {
+        try {
+            Function(request, args...);
+            return;
+        } catch (const std::bad_alloc &) {
+            fprintf(stderr, "engine2: request allocation failed (ENOMEM)\n");
+            if constexpr (!NoReply) {
+                fuse_reply_err(request, ENOMEM);
+                return;
+            }
+        } catch (const std::exception &error) {
+            fprintf(stderr, "engine2: request exception: %s\n", error.what());
+            if constexpr (!NoReply) {
+                fuse_reply_err(request, EIO);
+                return;
+            }
+        } catch (...) {
+            fprintf(stderr, "engine2: unknown request exception\n");
+            if constexpr (!NoReply) {
+                fuse_reply_err(request, EIO);
+                return;
+            }
+        }
+        if constexpr (NoReply)
+            fuse_reply_none(request);
+    }
+};
 static ssize_t custom_read(int fd, void *buf, size_t size, void *userdata) {
     auto &e = *static_cast<Engine *>(userdata);
     for (;;) {
@@ -1092,38 +1337,39 @@ int main(int argc, char **argv) {
                 throw std::runtime_error("cannot raise descriptor soft limit");
         }
         Engine e(argv[1], argv[2]);
+        e.fuse_fd = atoi(argv[3]);
         e.owner = static_cast<uid_t>(std::stoul(argv[5]));
         fuse_lowlevel_ops ops{};
         ops.init = init;
-        ops.lookup = lookup;
-        ops.forget = forget;
-        ops.forget_multi = forget_multi;
-        ops.getattr = getattr;
-        ops.setattr = setattr;
-        ops.readlink = readlink;
-        ops.mknod = mknod;
-        ops.mkdir = mkdir;
-        ops.unlink = unlink;
-        ops.rmdir = rmdir;
-        ops.symlink = symlink;
-        ops.rename = rename;
-        ops.link = link;
-        ops.open = open_file;
-        ops.read = read_file;
-        ops.write = write_file;
-        ops.flush = flush;
-        ops.release = release;
-        ops.fsync = fsync;
-        ops.opendir = opendir;
-        ops.readdir = readdir;
-        ops.releasedir = releasedir;
-        ops.statfs = statfs;
-        ops.getxattr = getxattr;
-        ops.setxattr = setxattr;
-        ops.removexattr = removexattr;
-        ops.listxattr = listxattr;
-        ops.create = create;
-        ops.flock = flock;
+        ops.lookup = Guard<decltype(ops.lookup), lookup>::call;
+        ops.forget = Guard<decltype(ops.forget), forget, true>::call;
+        ops.forget_multi = Guard<decltype(ops.forget_multi), forget_multi, true>::call;
+        ops.getattr = Guard<decltype(ops.getattr), getattr>::call;
+        ops.setattr = Guard<decltype(ops.setattr), setattr>::call;
+        ops.readlink = Guard<decltype(ops.readlink), readlink>::call;
+        ops.mknod = Guard<decltype(ops.mknod), mknod>::call;
+        ops.mkdir = Guard<decltype(ops.mkdir), mkdir>::call;
+        ops.unlink = Guard<decltype(ops.unlink), unlink>::call;
+        ops.rmdir = Guard<decltype(ops.rmdir), rmdir>::call;
+        ops.symlink = Guard<decltype(ops.symlink), symlink>::call;
+        ops.rename = Guard<decltype(ops.rename), rename>::call;
+        ops.link = Guard<decltype(ops.link), link>::call;
+        ops.open = Guard<decltype(ops.open), open_file>::call;
+        ops.read = Guard<decltype(ops.read), read_file>::call;
+        ops.write = Guard<decltype(ops.write), write_file>::call;
+        ops.flush = Guard<decltype(ops.flush), flush>::call;
+        ops.release = Guard<decltype(ops.release), release>::call;
+        ops.fsync = Guard<decltype(ops.fsync), fsync>::call;
+        ops.opendir = Guard<decltype(ops.opendir), opendir>::call;
+        ops.readdir = Guard<decltype(ops.readdir), readdir>::call;
+        ops.releasedir = Guard<decltype(ops.releasedir), releasedir>::call;
+        ops.statfs = Guard<decltype(ops.statfs), statfs>::call;
+        ops.getxattr = Guard<decltype(ops.getxattr), getxattr>::call;
+        ops.setxattr = Guard<decltype(ops.setxattr), setxattr>::call;
+        ops.removexattr = Guard<decltype(ops.removexattr), removexattr>::call;
+        ops.listxattr = Guard<decltype(ops.listxattr), listxattr>::call;
+        ops.create = Guard<decltype(ops.create), create>::call;
+        ops.flock = Guard<decltype(ops.flock), flock>::call;
         char arg0[] = "ytfs-engine2";
         char debug[] = "-d";
         char *arguments[] = {arg0, debug};

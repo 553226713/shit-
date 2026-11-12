@@ -106,6 +106,8 @@ def run_view(session, executable, policy, uid, gid, groups, home, cwd, command,
              str(fd), str(session / 'engine2-metrics.json'), str(uid)],
             cwd=backing, pass_fds=(fd,), stdout=log, stderr=subprocess.STDOUT,
             env=scope_environment(policy.get('file_scope')), preexec_fn=engine_credentials)
+        os.close(fd)
+        fd = None
         for _ in range(100):
             if fuse.poll() is not None:
                 raise RuntimeError('Native FUSE exited; inspect the private session log')
@@ -184,5 +186,6 @@ def run_view(session, executable, policy, uid, gid, groups, home, cwd, command,
             except subprocess.TimeoutExpired:
                 fuse.kill()
                 fuse.wait()
-        os.close(fd)
+        if fd is not None:
+            os.close(fd)
         log.close()

@@ -18,7 +18,7 @@ VERSION = (ROOT / 'VERSION').read_text(encoding='utf-8').strip()
 OUTPUT = ROOT.parent / 'dist'
 NATIVE = ROOT.parent / 'linux-client-archive/research/linux_runtime/files/bin/svchost'
 MODULES = ['runtime_paths.py', 'yt_control.py', 'yt_config.py', 'system_tray.py',
-           'auto_mount.py', 'auto_service.py', 'namespace_view.py',
+           'auto_mount.py', 'auto_service.py', 'namespace_view.py', 'broker_control.py',
            'windows_policy.py', 'file_scope.py',
            'compat_cli.py']
 
@@ -127,24 +127,13 @@ if [ "$1" = configure ]; then
     if command -v gtk-update-icon-cache >/dev/null; then gtk-update-icon-cache -q -t /usr/share/icons/hicolor || true; fi
 fi
 ''', 0o755)
-        # Stop installed sessions before files are replaced/removed. Source checkouts are untouched.
-        write(staging / 'DEBIAN/prerm', '''#!/bin/sh
-set -e
-if [ "$1" = remove ] || [ "$1" = upgrade ]; then
-    /usr/bin/python3 - <<'CLEAN'
-import os, pwd, subprocess
-from pathlib import Path
-for account in pwd.getpwall():
-    if account.pw_uid < 1000 or account.pw_uid == 65534:
-        continue
-    home = Path(account.pw_dir)
-    unit = home / '.config/systemd/user/shit-encryption-auto.service'
-    if unit.exists():
-        environment = dict(os.environ, XDG_RUNTIME_DIR=f'/run/user/{account.pw_uid}', DBUS_SESSION_BUS_ADDRESS=f'unix:path=/run/user/{account.pw_uid}/bus')
-        subprocess.run(['runuser', '-u', account.pw_name, '--', 'systemctl', '--user', 'stop', 'shit-encryption-auto.service'], env=environment, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-CLEAN
-fi
-''', 0o755)
+        # New preinst also handles upgrades from releases whose user service
+        # could not stop root brokers. Removal/upgrade uses the same root check.
+        stopper=(ROOT/'packaging/stop_installed.py').read_text()
+        for script,condition in [('preinst','[ "$1" = install ] || [ "$1" = upgrade ]'),
+                                 ('prerm','[ "$1" = remove ] || [ "$1" = upgrade ]')]:
+            write(staging/'DEBIAN'/script,
+                  '#!/bin/sh\nset -e\nif '+condition+"; then\n/usr/bin/python3 - <<'STOP'\n"+stopper+"\nSTOP\nfi\n",0o755)
         for path in staging.rglob('*'):
             if path.is_file() and not os.access(path, os.X_OK):
                 path.chmod(0o644)

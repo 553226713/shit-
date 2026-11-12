@@ -38,7 +38,7 @@ def runtime_policy() -> Path:
 class Mount:
     origin: Path
     backing: Path
-    fd: int
+    fd: int | None
     process: subprocess.Popen
     log_handle: object = field(repr=False)
 
@@ -207,6 +207,10 @@ def open_mount(
             )
         except PermissionError as error:
             raise RuntimeError(f"无法执行加密引擎 {executable}：请检查安装目录的执行权限和挂载选项；{error}") from error
+        # The child has inherited its own descriptor. Release the broker copy
+        # before waiting for readiness, so even startup crashes abort pending I/O.
+        os.close(fd)
+        fd = None
         for _ in range(100):
             if process.poll() is not None:
                 raise RuntimeError(f"FUSE 进程提前退出: {origin}")
@@ -243,7 +247,8 @@ def close_mount(item: Mount) -> None:
         except subprocess.TimeoutExpired:
             item.process.kill()
             item.process.wait()
-    os.close(item.fd)
+    if item.fd is not None:
+        os.close(item.fd)
     LIBC.umount2(os.fsencode(item.backing), 2)
     item.log_handle.close()
 
@@ -287,6 +292,8 @@ def run_broker() -> int:
     STATE.mkdir(mode=0o750 if PACKAGED else 0o700, parents=True, exist_ok=True)
     STATE.chmod(0o750 if PACKAGED else 0o700)
     os.chown(STATE, 0 if PACKAGED else uid, gid)
+    from broker_control import BrokerControl
+    control=BrokerControl(STATE,uid,gid)
     if PACKAGED:
         from engine2.artifacts import installed_engine
         installed_engine(ENGINE_DIR)
@@ -304,6 +311,8 @@ def run_broker() -> int:
     mounts: list[Mount] = []
     compatibility = None
     stopping = False
+    worker_failures = {}
+    compat_retry = 0
 
     def stop(_signum=None, _frame=None):
         nonlocal stopping
@@ -313,6 +322,9 @@ def run_broker() -> int:
     signal.signal(signal.SIGINT, stop)
     try:
         for directory in directories:
+            if control.stop_requested():
+                stopping=True
+                break
             log.write(f"[{yt_config._now()}] mounting {directory}\n")
             log.flush()
             try:
@@ -333,23 +345,40 @@ def run_broker() -> int:
                 "engine_path": str(runtime_engine()),
                 "policy_path": str(runtime_policy()),
                 "error": None,
+                "worker_failures": {},
             },
             uid,
             gid,
         )
         from compat.manager import GitPatches
-        compatibility = GitPatches(uid, gid, groups, log)
         while not stopping:
+            if control.stop_requested():
+                stopping=True
+                break
             for item in list(mounts):
-                if item.process.poll() is not None:
-                    skipped[str(item.origin)] = "FUSE 服务已退出，已跳过"
+                code = item.process.poll()
+                if code is not None:
+                    reason = f"退出码 {code}" if code >= 0 else f"信号 {-code}"
+                    details={'pid':item.process.pid,'exit_code':code,'signal':-code if code<0 else None,
+                             'log':str(item.backing.parent/'fuse.log')}
+                    worker_failures[str(item.origin)]=details
+                    skipped[str(item.origin)] = f"加密引擎已退出（{reason}），请检查引擎日志"
+                    log.write(f"[{yt_config._now()}] engine exited: {item.origin}, {reason}, log={details['log']}\n");log.flush()
                     close_mount(item)
                     mounts.remove(item)
                     write_status({"state": "running" if mounts else "idle",
                                   "mounts": [str(m.origin) for m in mounts],
-                                  "skipped": skipped, "updated_at": yt_config._now()}, uid, gid)
-            if compatibility.tick([item.origin for item in mounts]):
-                write_status({'compatibility': compatibility.status()}, uid, gid)
+                                  "skipped": skipped, "worker_failures":worker_failures,
+                                  "updated_at": yt_config._now()}, uid, gid)
+            if time.monotonic() >= compat_retry:
+                try:
+                    if compatibility is None:compatibility=GitPatches(uid,gid,groups,log)
+                    if compatibility.tick([item.origin for item in mounts]):
+                        write_status({'compatibility': compatibility.status()}, uid, gid)
+                except Exception as error:
+                    log.write(f"[compat] background compatibility failed: {error}\n");log.flush()
+                    write_status({'compatibility':{'error':str(error)}},uid,gid)
+                    compat_retry=time.monotonic()+60
             time.sleep(1)
         return 0
     except Exception as error:
@@ -368,7 +397,8 @@ def run_broker() -> int:
         return 1
     finally:
         if compatibility is not None:
-            compatibility.close()
+            try:compatibility.close()
+            except Exception as error:log.write(f"[compat] shutdown error: {error}\n")
         for item in reversed(mounts):
             close_mount(item)
         if not stopping:
@@ -393,9 +423,14 @@ def run_broker() -> int:
                 gid,
             )
         log.close()
+        control.close()
 
 
 def main() -> int:
+    if "--stop-broker" in sys.argv[1:]:
+        from broker_control import request_stop
+        request_stop(STATE)
+        return 0
     if "--broker" in sys.argv[1:]:
         return run_broker()
     if PACKAGED:

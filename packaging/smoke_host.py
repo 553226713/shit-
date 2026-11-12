@@ -59,8 +59,12 @@ import runtime_paths as p
 p.CONFIG_DIR=Path(sys.argv[2])/"config"
 p.STATE_DIR=Path(sys.argv[2])/"state"
 p.MONITOR_DIR=Path(sys.argv[3])
-from auto_mount import run_broker
-raise SystemExit(run_broker())
+if '--stop-broker' in sys.argv:
+    from broker_control import request_stop
+    request_stop(p.MONITOR_DIR)
+else:
+    from auto_mount import run_broker
+    raise SystemExit(run_broker())
 ''')
         raw_fd=os.open(project,os.O_RDONLY|os.O_DIRECTORY)
         def disk():
@@ -99,9 +103,24 @@ raise SystemExit(run_broker())
                     assert subprocess.check_output([str(app/'vendor/ytfs-textconv')],input=saved[1024:])==expected
                     print('PASS: root-owned data mount allowed by supplementary-group access; unreadable/unwritable directory rejected')
                     print('PASS: packaged FUSE: plain/encrypted read/write, atomic save, mmap, original 301 header')
+                    if os.environ.get('YT_PACKAGE_TEST_KILL_WORKER')=='1':
+                        selector="from pathlib import Path;import sys;pid=sys.argv[1];children=Path('/proc/'+pid+'/task/'+pid+'/children').read_text().split();print(next(p for p in children if b'ytfs-engine2' in Path('/proc/'+p+'/cmdline').read_bytes()))"
+                        child=subprocess.check_output(['sudo','-n','/usr/bin/python3','-c',selector,str(payload['pid'])]).decode().strip()
+                        privileged('kill','-KILL',child)
+                        deadline=time.monotonic()+5
+                        while time.monotonic()<deadline:
+                            failed=json.loads(status.read_text())
+                            if str(project) in failed.get('worker_failures',{}):break
+                            time.sleep(.05)
+                        assert failed['worker_failures'][str(project)]['exit_code']==-9,failed
+                        assert file.read_text()=='updated file' and disk()==saved
+                        print('PASS: forced worker exit recorded signal 9; original directory and ciphertext recovered')
+
                 finally:
-                    subprocess.run(['sudo','-n','kill','-TERM',str(process.pid)],check=False)
+                    if process.poll() is None:
+                        subprocess.run(['/usr/bin/python3','-I','-B',str(runner),str(app),str(base),str(runtime),'--stop-broker'],check=True,timeout=20)
                     process.wait(timeout=20)
+                    assert json.loads(status.read_text())['state']=='stopped'
                     privileged('rm','-rf','--',runtime)
                 assert file.read_text()=='updated file'
                 # The original data-disk bind mount remains after FUSE stops.

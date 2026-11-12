@@ -1,4 +1,4 @@
-Engine 2 — local C++ FUSE engine (application version remains 1.0.7)
+Engine 2 — local C++ FUSE engine (application version remains 1.0.8)
 
 Source and installed builds use only this engine; the old engine, callback patcher and executable backups were deleted.
 The original vendor filesystem executable was replaced by a hash-verified 3861
@@ -62,3 +62,18 @@ source xattrs/ACLs are not copied by that conversion path. Advanced fallocate,
 copy_file_range and ioctl operations may require caller fallback. Git's existing
 read-only display adapter remains separate from core encryption. SVN/Hg tests
 cover encrypted storage and restore, not plaintext history display or merges.
+
+1.0.8 resource stability:
+Inactive inode descriptors form a bounded, reclaimable LRU cache. Open handles
+and in-flight requests retain pinned descriptors; evicted paths are reopened
+beneath the backing root without symlink traversal and checked by device/inode.
+This does not limit repository size, Git pack mapping size or address space.
+Metadata fingerprints store only size and timestamps. C++ callback exceptions
+return I/O/resource errors instead of terminating the whole FUSE process.
+Broker shutdown uses a per-user authenticated control socket and single-instance
+lock, allowing normal user-service stops to clean up root-owned mount workers.
+Worker exit status/signal and log paths are recorded. This does not establish the
+cause of any remote crash without its logs, nor add automatic crash recovery.
+
+The broker releases its duplicate /dev/fuse descriptor after worker startup,
+so a dead worker aborts outstanding requests rather than leaving them hung.

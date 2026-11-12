@@ -21,6 +21,7 @@ After=default.target
 [Service]
 Type=simple
 ExecStart=/usr/bin/python3 {ROOT / 'auto_mount.py'}
+ExecStop=/usr/bin/python3 {ROOT / 'auto_mount.py'} --stop-broker
 Restart={"no" if PACKAGED else "on-failure"}
 RestartSec=3
 TimeoutStopSec=20

@@ -21,7 +21,9 @@ def inside():
     os.chown(runtime,0,account.pw_gid);runtime.chmod(0o750)
     try:
         subprocess.run(['sudo','-n','-u',account.pw_name,'env',
-                        'YT_PACKAGE_TEST_RUNTIME='+str(runtime),'/usr/bin/python3',
+                        'YT_PACKAGE_TEST_RUNTIME='+str(runtime),
+                        *(['YT_PACKAGE_TEST_KILL_WORKER=1'] if '--kill-worker' in sys.argv else []),
+                        '/usr/bin/python3',
                         str(HERE/'smoke_host.py')],check=True)
         print('PASS: packaged engine executes from installation assets while /run remains noexec',flush=True)
     finally:
@@ -33,4 +35,5 @@ if __name__=='__main__':
         inside()
     else:
         subprocess.run(['sudo','-n','unshare','--mount','--propagation','private',
-                        '/usr/bin/python3',str(Path(__file__).resolve()),'--inside'],check=True)
+                        '/usr/bin/python3',str(Path(__file__).resolve()),'--inside',
+                        *(['--kill-worker'] if '--kill-worker' in sys.argv else [])],check=True)
