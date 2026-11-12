@@ -1,6 +1,7 @@
 #define FUSE_USE_VERSION 318
 #include "cipher.hpp"
 #include "policy.hpp"
+#include "error_log.hpp"
 #include <cctype>
 #include <cstdio>
 #include <cstdlib>
@@ -491,7 +492,15 @@ struct Engine {
 };
 static Engine &engine(fuse_req_t r) { return *static_cast<Engine *>(fuse_req_userdata(r)); }
 static Handle *handle(fuse_file_info *fi) { return reinterpret_cast<Handle *>(fi->fh); }
-static void reply_error(fuse_req_t r, int e) { fuse_reply_err(r, e < 0 ? -e : e); }
+static void reply_error(fuse_req_t r, int e) {
+    e = e < 0 ? -e : e;
+    switch (e) {
+    case EIO: case ENOMEM: case EMFILE: case ENFILE: case ENOSPC: case EDQUOT:
+    case EROFS: case ENOTCONN: case ETIMEDOUT: case EOVERFLOW:
+        errors::report(e, fuse_req_ctx(r)->pid, fuse_req_ctx(r)->uid, strerror(e));
+    }
+    fuse_reply_err(r, e);
+}
 static void init(void *userdata, fuse_conn_info *c) {
     auto &e = *static_cast<Engine *>(userdata);
     e.passthrough = fuse_set_feature_flag(c, FUSE_CAP_PASSTHROUGH);
@@ -500,20 +509,12 @@ static void init(void *userdata, fuse_conn_info *c) {
     fuse_unset_feature_flag(c, FUSE_CAP_WRITEBACK_CACHE);
     // No readdirplus auto lookups: callers control lookup lifetime explicitly.
     fuse_unset_feature_flag(c, FUSE_CAP_READDIRPLUS_AUTO);
-    rlimit limit{};
-    getrlimit(RLIMIT_NOFILE, &limit);
-    fprintf(
-        stderr,
-        "engine2: pid=%ld passthrough=%d direct_io_mmap=%d threads=%u fd_cache=%zu nofile=%lu\n",
-        static_cast<long>(getpid()), e.passthrough, e.mmap,
-        std::max(2u, std::min(16u, std::thread::hardware_concurrency())), e.fd_budget,
-        static_cast<unsigned long>(limit.rlim_cur));
 }
 static void forget_safely(Engine &e, fuse_ino_t ino) noexcept {
     try {
         e.forget(ino, 1);
     } catch (...) {
-        fprintf(stderr, "engine2: deferred lookup cleanup failed\n");
+        errors::report(EIO, 0, 0, "deferred lookup cleanup failed");
     }
 }
 static void discard_handle(Engine &e, Handle *h) noexcept {
@@ -532,7 +533,7 @@ static void discard_handle(Engine &e, Handle *h) noexcept {
         delete h;
         e.collect(ino);
     } catch (...) {
-        fprintf(stderr, "engine2: handle cleanup failed\n");
+        errors::report(EIO, 0, 0, "handle cleanup failed");
     }
 }
 static void lookup(fuse_req_t r, fuse_ino_t parent, const char *name) {
@@ -1311,23 +1312,24 @@ template <typename Signature, Signature Function, bool NoReply = false> struct G
 template <typename... Args, void (*Function)(fuse_req_t, Args...), bool NoReply>
 struct Guard<void (*)(fuse_req_t, Args...), Function, NoReply> {
     static void call(fuse_req_t request, Args... args) noexcept {
+        errors::operation = __PRETTY_FUNCTION__;
         try {
             Function(request, args...);
             return;
         } catch (const std::bad_alloc &) {
-            fprintf(stderr, "engine2: request allocation failed (ENOMEM)\n");
+            errors::report(ENOMEM, fuse_req_ctx(request)->pid, fuse_req_ctx(request)->uid, "request allocation failed");
             if constexpr (!NoReply) {
                 fuse_reply_err(request, ENOMEM);
                 return;
             }
         } catch (const std::exception &error) {
-            fprintf(stderr, "engine2: request exception: %s\n", error.what());
+            errors::report(EIO, fuse_req_ctx(request)->pid, fuse_req_ctx(request)->uid, error.what());
             if constexpr (!NoReply) {
                 fuse_reply_err(request, EIO);
                 return;
             }
         } catch (...) {
-            fprintf(stderr, "engine2: unknown request exception\n");
+            errors::report(EIO, fuse_req_ctx(request)->pid, fuse_req_ctx(request)->uid, "unknown request exception");
             if constexpr (!NoReply) {
                 fuse_reply_err(request, EIO);
                 return;
@@ -1373,6 +1375,7 @@ int main(int argc, char **argv) {
             if (setrlimit(RLIMIT_NOFILE, &descriptors))
                 throw std::runtime_error("cannot raise descriptor soft limit");
         }
+        errors::destination = getenv("YT_ENGINE_ERROR_LOG");
         Engine e(argv[1], argv[2]);
         e.fuse_fd = atoi(argv[3]);
         e.owner = static_cast<uid_t>(std::stoul(argv[5]));
@@ -1430,9 +1433,10 @@ int main(int argc, char **argv) {
         e.metrics(argv[4]);
         fuse_session_destroy(session);
         fuse_opt_free_args(&args);
+        if (status) errors::report(EIO, 0, 0, "FUSE session loop failed");
         return status ? 1 : 0;
     } catch (const std::exception &error) {
-        fprintf(stderr, "engine2: %s\n", error.what());
+        errors::report(EIO, 0, 0, error.what());
         return 1;
     }
 }

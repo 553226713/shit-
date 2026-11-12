@@ -6,6 +6,7 @@ import os
 import signal
 import subprocess
 import time
+import error_log
 from pathlib import Path
 from file_scope import scope_environment
 
@@ -105,7 +106,8 @@ def run_view(session, executable, policy, uid, gid, groups, home, cwd, command,
             [str(executable), str(backing), str(policy_path),
              str(fd), str(session / 'engine2-metrics.json'), str(uid)],
             cwd=backing, pass_fds=(fd,), stdout=log, stderr=subprocess.STDOUT,
-            env=scope_environment(policy.get('file_scope')), preexec_fn=engine_credentials)
+            env=error_log.engine_environment(scope_environment(policy.get('file_scope')), uid, gid),
+            preexec_fn=engine_credentials)
         os.close(fd)
         fd = None
         for _ in range(100):

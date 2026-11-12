@@ -16,6 +16,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import yt_config
+import error_log
 from namespace_view import LIBC, mount
 from runtime_paths import PACKAGED, UID, MONITOR_DIR, ENGINE_DIR
 from file_scope import scope_environment
@@ -203,7 +204,7 @@ def open_mount(
                 stdout=log_handle,
                 stderr=subprocess.STDOUT,
                 preexec_fn=credentials,
-                env=scope_environment(file_scope, compat_modules),
+                env=error_log.engine_environment(scope_environment(file_scope, compat_modules), uid, gid),
             )
         except PermissionError as error:
             raise RuntimeError(f"无法执行加密引擎 {executable}：请检查安装目录的执行权限和挂载选项；{error}") from error
@@ -271,6 +272,22 @@ def prepare_runtime() -> tuple[dict, list[Path], int, int, list[int]]:
 
 
 def run_broker() -> int:
+    try:
+        return _run_broker()
+    except Exception:
+        try:
+            if PACKAGED and os.geteuid() == 0 and UID:
+                gid = pwd.getpwuid(UID).pw_gid
+                log = error_log.logger('monitor', error_log.monitor_directory(UID, gid), gid)
+            else:
+                log = error_log.logger('monitor', LOG.parent)
+            log.exception('Monitor startup failed')
+        except Exception:
+            pass
+        raise
+
+
+def _run_broker() -> int:
     if PACKAGED and (os.geteuid() != 0 or UID == 0):
         raise ValueError("监控服务需要通过管理员授权启动")
     uid = UID if PACKAGED else int(os.environ.get("SUDO_UID", "0"))
@@ -305,9 +322,10 @@ def run_broker() -> int:
     ):
         if not PACKAGED and runtime_file.exists():
             os.chown(runtime_file, uid, gid)
-    log = LOG.open("a", encoding="utf-8")
-    LOG.chmod(0o600)
-    os.chown(LOG, uid, gid)
+    log_dir = error_log.monitor_directory(uid, gid) if PACKAGED else LOG.parent
+    log = error_log.logger('monitor', log_dir, gid if PACKAGED else None)
+    for directory, reason in skipped.items():
+        log.error('Directory skipped: path=%s reason=%s', directory, reason)
     mounts: list[Mount] = []
     compatibility = None
     stopping = False
@@ -325,15 +343,12 @@ def run_broker() -> int:
             if control.stop_requested():
                 stopping=True
                 break
-            log.write(f"[{yt_config._now()}] mounting {directory}\n")
-            log.flush()
             try:
                 mounts.append(open_mount(directory, uid, gid, groups,
                                          file_scope=effective.get("file_scope")))
             except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as error:
                 skipped[str(directory)] = str(error)
-                log.write(f"[{yt_config._now()}] skipped {directory}: {error}\n")
-                log.flush()
+                log.exception('Mount failed: path=%s', directory)
         write_status(
             {
                 "state": "running" if mounts else "idle",
@@ -360,10 +375,11 @@ def run_broker() -> int:
                 if code is not None:
                     reason = f"退出码 {code}" if code >= 0 else f"信号 {-code}"
                     details={'pid':item.process.pid,'exit_code':code,'signal':-code if code<0 else None,
-                             'log':str(item.backing.parent/'fuse.log')}
+                             'log':str(log_dir/'engine-errors.log' if PACKAGED else item.backing.parent/'fuse.log')}
                     worker_failures[str(item.origin)]=details
                     skipped[str(item.origin)] = f"加密引擎已退出（{reason}），请检查引擎日志"
-                    log.write(f"[{yt_config._now()}] engine exited: {item.origin}, {reason}, log={details['log']}\n");log.flush()
+                    log.error('Engine exited: path=%s pid=%s exit_code=%s signal=%s log=%s',
+                              item.origin, item.process.pid, code, details['signal'], details['log'])
                     close_mount(item)
                     mounts.remove(item)
                     write_status({"state": "running" if mounts else "idle",
@@ -376,14 +392,13 @@ def run_broker() -> int:
                     if compatibility.tick([item.origin for item in mounts]):
                         write_status({'compatibility': compatibility.status()}, uid, gid)
                 except Exception as error:
-                    log.write(f"[compat] background compatibility failed: {error}\n");log.flush()
+                    log.exception('Background compatibility failed')
                     write_status({'compatibility':{'error':str(error)}},uid,gid)
                     compat_retry=time.monotonic()+60
             time.sleep(1)
         return 0
     except Exception as error:
-        log.write(f"[{yt_config._now()}] error: {error}\n")
-        log.flush()
+        log.exception('Monitor failed')
         write_status(
             {
                 "state": "failed",
@@ -398,9 +413,10 @@ def run_broker() -> int:
     finally:
         if compatibility is not None:
             try:compatibility.close()
-            except Exception as error:log.write(f"[compat] shutdown error: {error}\n")
+            except Exception:log.exception('Compatibility shutdown failed')
         for item in reversed(mounts):
-            close_mount(item)
+            try:close_mount(item)
+            except Exception:log.exception('Unmount failed: path=%s', item.origin)
         if not stopping:
             write_status(
                 {
@@ -422,7 +438,9 @@ def run_broker() -> int:
                 uid,
                 gid,
             )
-        log.close()
+        for handler in list(log.handlers):
+            handler.close()
+            log.removeHandler(handler)
         control.close()
 
 
@@ -472,6 +490,7 @@ def main() -> int:
             dict(os.environ),
         )
     except (OSError, ValueError, RuntimeError) as error:
+        error_log.logger('launcher').exception('Monitor launch failed')
         STATE.mkdir(mode=0o700, parents=True, exist_ok=True)
         write_status(
             {

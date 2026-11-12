@@ -19,7 +19,7 @@ OUTPUT = ROOT.parent / 'dist'
 NATIVE = ROOT.parent / 'linux-client-archive/research/linux_runtime/files/bin/svchost'
 MODULES = ['runtime_paths.py', 'yt_control.py', 'yt_config.py', 'system_tray.py',
            'auto_mount.py', 'auto_service.py', 'namespace_view.py', 'broker_control.py',
-           'windows_policy.py', 'file_scope.py',
+           'windows_policy.py', 'file_scope.py', 'error_log.py',
            'compat_cli.py']
 
 

@@ -22,6 +22,7 @@ from gi.repository import Gdk, Gio, GLib, Gtk, Pango  # noqa: E402
 
 import yt_config  # noqa: E402
 import auto_service  # noqa: E402
+import error_log  # noqa: E402
 from system_tray import SystemTray  # noqa: E402
 from runtime_paths import VERSION  # noqa: E402
 
@@ -81,7 +82,7 @@ class ClientWindow(Gtk.ApplicationWindow):
         self._monitor_refresh_source = None
         self._monitor_refresh_running = False
         self._monitor_refresh_pending = False
-        self._start_monitor_when_ready = True
+        self._start_monitor_when_ready = os.environ.get('YT_CONTROL_SKIP_MONITOR_START') != '1'
         self.server_result = "尚未检测"
         self._build_header()
         self._build_body()
@@ -113,7 +114,16 @@ class ClientWindow(Gtk.ApplicationWindow):
         update = secondary_button("更新策略", "view-refresh-symbolic")
         update.connect("clicked", lambda _button: self._update_policy())
         header.pack_start(update)
+        logs = secondary_button("打开日志目录")
+        logs.connect("clicked", lambda _button: self._open_logs())
+        header.pack_start(logs)
         self.set_titlebar(header)
+
+    def _open_logs(self) -> None:
+        try:
+            Gio.AppInfo.launch_default_for_uri(error_log.log_directory().as_uri(), None)
+        except (OSError, GLib.Error) as error:
+            self._show_error("打开日志目录失败", str(error))
 
     def _build_body(self) -> None:
         body = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
@@ -1017,7 +1027,7 @@ class ClientWindow(Gtk.ApplicationWindow):
         return True
 
     def _startup_policy_check(self) -> bool:
-        if self.effective["encryption"]["key"]:
+        if self._start_monitor_when_ready and self.effective["encryption"]["key"]:
             self._run_auto_action(auto_service.start)
         self._periodic_policy_check()
         return False
@@ -1036,6 +1046,7 @@ class ClientWindow(Gtk.ApplicationWindow):
         threading.Thread(target=work, daemon=True).start()
 
     def _server_checked(self, ok: bool, message: str) -> bool:
+        if not ok:error_log.logger('ui').error('Server check failed: %s', message)
         self.server_result = message
         self._refresh_status()
         return False
@@ -1066,6 +1077,7 @@ class ClientWindow(Gtk.ApplicationWindow):
         threading.Thread(target=work, daemon=True).start()
 
     def _policy_updated(self, policy: dict[str, Any] | None, error: str | None) -> bool:
+        if error:error_log.logger('ui').error('Policy refresh failed: %s', error)
         self.updating = False
         self.settings = yt_config.load_settings()
         self.remote = yt_config.load_remote_policy()
@@ -1128,6 +1140,8 @@ class ClientWindow(Gtk.ApplicationWindow):
             self._show_error("导入策略失败", str(error))
 
     def _show_error(self, title: str, detail: str) -> None:
+        try:error_log.logger('ui').error('%s: %s', title, detail)
+        except OSError:pass
         self.status_detail.set_text(f"{title}：{detail}")
         dialog = Gtk.AlertDialog(message=title, detail=detail)
         dialog.show(self)
@@ -1221,7 +1235,7 @@ class YTControl(Gtk.Application):
             if error:
                 self.window._show_error("停止自动监控失败", error)
         elif error:
-            print(f"stop auto service: {error}", file=sys.stderr, flush=True)
+            error_log.logger('ui').error('Stop auto service failed: %s', error)
         return False
 
     def _window_destroyed(self, _window: Gtk.Window) -> None:
@@ -1256,6 +1270,7 @@ def register_desktop_entry() -> None:
 
 
 def main() -> int:
+    error_log.install_exception_hooks('ui')
     GLib.set_prgname(APP_ID)
     GLib.set_application_name("shit加密")
     register_desktop_entry()

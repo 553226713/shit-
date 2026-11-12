@@ -19,4 +19,9 @@ def main():
 
 
 if __name__ == '__main__':
-    raise SystemExit(main())
+    try:
+        raise SystemExit(main())
+    except Exception:
+        from error_log import logger
+        logger('compat').exception('Compatibility command failed')
+        raise

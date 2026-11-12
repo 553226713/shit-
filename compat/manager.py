@@ -74,6 +74,7 @@ class GitPatches:
                 self.retry_after.pop(repo, None)
             else:
                 self.failures[str(repo)] = f'兼容配置失败，退出码 {code}'
+                self.log.error('Git compatibility failed: path=%s exit_code=%s', repo, code)
                 self.retry_after[repo] = now+60
             self.active = None
             changed = True
@@ -101,14 +102,14 @@ class GitPatches:
             def low_priority():
                 if os.geteuid() == 0: as_user(self.uid, self.gid, self.groups)
                 os.nice(10)
-            self.log.write(f'[compat] refreshing Git display rules: {repo}\n'); self.log.flush()
             try:
                 process = subprocess.Popen(
                     ['/usr/bin/ionice', '-c', '3', sys.executable, str(ROOT / 'compat_cli.py'), 'git-configure', str(repo),
                      '--config-dir', str(CONFIG_DIR)], stdin=subprocess.DEVNULL,
-                    stdout=self.log, stderr=subprocess.STDOUT,
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                     preexec_fn=low_priority)
             except (OSError, subprocess.SubprocessError) as error:
+                self.log.exception('Git compatibility launch failed: path=%s', repo)
                 self.failures[str(repo)] = str(error)
                 self.retry_after[repo] = now+60
                 self.dirty.discard(repo)

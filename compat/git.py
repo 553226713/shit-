@@ -161,6 +161,8 @@ def main():
     try:
         print(json.dumps(enable(args.repository, config_dir=args.config_dir), ensure_ascii=False, indent=2))
     except (OSError, ValueError, subprocess.CalledProcessError) as error:
+        from error_log import logger
+        logger('compat').exception('Git configuration failed: path=%s', args.repository)
         print(f'启用 Git 明文显示失败：{error}', file=sys.stderr)
         return 1
     return 0
