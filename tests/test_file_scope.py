@@ -1,6 +1,8 @@
+import os
 import sys
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from file_scope import normalize_scope, scope_environment
@@ -8,25 +10,22 @@ import yt_config
 
 
 class FileScopeTests(unittest.TestCase):
-    def test_custom_scope_survives_settings_and_effective_policy(self):
-        scope = {'excluded_directories': ['cache-extra'],
-                 'included_extensions': ['.JAVA', '.java', '.txt'],
-                 'included_names': ['Customfile']}
-        settings = yt_config.normalize_settings({'file_scope': scope})
+    def test_monitored_roots_have_no_directory_or_file_type_exclusions(self):
+        self.assertTrue(all(not values for values in normalize_scope().values()))
+
+    def test_saved_legacy_restrictions_no_longer_exclude_monitored_files(self):
+        settings = yt_config.normalize_settings({'file_scope': {
+            'excluded_directories': ['tmp', '.git', 'node_modules', 'custom-cache'],
+            'included_extensions': ['.java'], 'included_names': ['Customfile']}})
         effective = yt_config.effective_config(settings, None)
-        self.assertEqual(effective['file_scope']['included_extensions'], ['.java', '.txt'])
-        self.assertEqual(scope_environment(effective['file_scope'])['YT_SCOPE_EXCLUDED_DIRS'], 'cache-extra')
+        self.assertTrue(all(not values for values in effective['file_scope'].values()))
 
-    def test_empty_extensions_allow_all_types_and_defaults_are_independent(self):
-        self.assertEqual(scope_environment({'included_extensions': []})['YT_SCOPE_EXTENSIONS'], '')
-        first = normalize_scope()
-        first['excluded_directories'].clear()
-        self.assertIn('node_modules', normalize_scope()['excluded_directories'])
-
-    def test_scope_rejects_paths_and_environment_delimiters(self):
-        for entry in ['../src', '.', '..', 'foo,bar', 'bad\0name', 'bad\nname']:
-            with self.subTest(entry=entry), self.assertRaises(ValueError):
-                normalize_scope({'excluded_directories': [entry]})
+    def test_runtime_clears_inherited_scope_restrictions(self):
+        with patch.dict(os.environ, {'YT_SCOPE_EXCLUDED_DIRS': 'tmp', 'YT_SCOPE_EXTENSIONS': '.java'}):
+            env = scope_environment({'excluded_directories': ['tmp']})
+        self.assertEqual(env['YT_SCOPE_EXCLUDED_DIRS'], '')
+        self.assertEqual(env['YT_SCOPE_EXTENSIONS'], '')
+        self.assertEqual(env['YT_SCOPE_NAMES'], '')
 
 
 if __name__ == '__main__':

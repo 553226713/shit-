@@ -1,4 +1,4 @@
-"""Audit excluded directories and real SVN/Mercurial round trips in /tmp only.
+"""Audit complete monitored trees and real SVN/Mercurial round trips in /tmp only.
 
 --tools points at a temporary dpkg-deb extraction of SVN/Mercurial and their
 dependencies; no system installation or real repository writes are required.
@@ -15,7 +15,6 @@ import time
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-from file_scope import DEFAULT_SCOPE
 from verify_git_roundtrip import broker, MAGIC
 
 
@@ -45,8 +44,8 @@ def verify(args):
         engine = binary / 'ytfs-engine2'; shutil.copy2(args.engine, engine)
         (binary / 'sgfs.conf').write_text(yt_config.build_sgfs_conf(effective))
         (binary / 'sgfs.conf').chmod(0o600)
-        excluded = DEFAULT_SCOPE['excluded_directories']
-        for name in excluded:
+        monitored = ['.git', '.svn', '.hg', 'node_modules', 'target', 'build', 'dist', '.cache', 'tmp', 'temp']
+        for name in monitored:
             p = project / 'nested' / name / 'Encrypted.java'
             p.parent.mkdir(parents=True, exist_ok=True); p.write_bytes(raw)
         for name in ['src/Encrypted.java', 'target-source/Encrypted.JAVA', '.idea/settings.java',
@@ -80,19 +79,19 @@ def verify(args):
             ordinary = work / 'ordinary.py'; ordinary.write_text(reader)
             assert run(sys.executable, ordinary, project / 'src/Encrypted.java', hg) == plain
             results['ordinary_python_with_hg_argument_still_decrypts'] = True
-            for name in excluded:
+            for name in monitored:
                 p = project / 'nested' / name / 'Encrypted.java'
-                assert p.read_bytes() == raw and p.stat().st_size == len(raw), name
+                assert p.read_bytes() == plain and p.stat().st_size == len(plain), name
                 p.write_bytes(b'ordinary cache bytes')
                 assert p.read_bytes() == b'ordinary cache bytes', name
-            results['excluded_directory_read_write'] = excluded
+            results['all_monitored_subdirectory_read_write'] = monitored
             for name in ['target-source/Encrypted.JAVA', '.idea/settings.java', '.vscode/settings.java', '.gitignore']:
                 assert (project / name).read_bytes() == plain, name
-            assert (project / 'binary.jar').read_bytes() == raw
+            assert (project / 'binary.jar').read_bytes() == plain
             assert (project / 'cache-alias/Encrypted.java').read_bytes() == b'ordinary cache bytes'
             late = project / 'created-after-mount/.svn/Encrypted.java'
             late.parent.mkdir(parents=True); late.write_bytes(raw)
-            assert late.read_bytes() == raw
+            assert late.read_bytes() == plain
             results['new_directories_symlinks_extensions_and_lookalikes'] = True
             for name, directory in [('svn', svn_work), ('hg', hg_work)]:
                 p = directory / 'Encrypted.java'

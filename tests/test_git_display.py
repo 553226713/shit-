@@ -61,7 +61,7 @@ class GitDisplayTests(unittest.TestCase):
             saved = json.loads(info.with_name('shit-encryption-display-backup.json').read_text())
             self.assertEqual(saved['attributes'], 'custom.java diff=existing\n')
 
-    def test_managed_entry_updates_without_reconfiguring_and_uses_custom_scope(self):
+    def test_managed_entry_updates_without_reconfiguring_with_legacy_scope(self):
         with tempfile.TemporaryDirectory() as tmp:
             repo=Path(tmp)/'repo';repo.mkdir()
             config=Path(tmp)/'config';config.mkdir()

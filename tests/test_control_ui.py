@@ -106,16 +106,18 @@ class WindowTests(unittest.TestCase):
             schedule.assert_called_once()
         window.destroy()
 
-    def test_file_scope_edit_saves_and_refreshes_monitor(self):
+    def test_new_file_format_applies_and_refreshes_monitor(self):
         window = ClientWindow(self.app)
-        window.scope_entries['excluded_directories'].set_text('node_modules, target, custom-cache')
-        window.scope_entries['included_extensions'].set_text('.java, .TXT')
-        with patch('yt_control.yt_config.save_settings', side_effect=lambda settings: settings), patch('yt_control.yt_config.write_effective_runtime_config', side_effect=yt_config.effective_config), patch.object(window, '_queue_monitor_refresh') as refresh:
-            window._apply_file_scope()
-            self.assertEqual(window.settings['file_scope']['included_extensions'], ['.java', '.txt'])
-            self.assertIn('custom-cache', window.effective['file_scope']['excluded_directories'])
+        window.settings = yt_config.normalize_settings({'encryption': {'key': 'test-policy'}})
+        window.remote = None
+        self.assertEqual(window.settings['encryption']['new_file_mode'], 'plain')
+        window.new_file_mode.set_selected(1)
+        with patch('yt_control.yt_config.save_settings', side_effect=lambda value: value), patch('yt_control.yt_config.write_effective_runtime_config', side_effect=yt_config.effective_config), patch('yt_control.yt_config.load_remote_policy', return_value=None), patch.object(window, '_queue_monitor_refresh') as refresh:
+            window._apply_new_file_mode()
+            self.assertEqual(window.effective['encryption']['new_file_mode'], 'encrypted')
             refresh.assert_called_once()
         window.destroy()
+
 
 
 class SyncTests(unittest.TestCase):

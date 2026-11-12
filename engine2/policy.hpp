@@ -52,14 +52,12 @@ class Policy {
         std::string program, file;
     };
     std::vector<Rule> rules_;
-    std::vector<std::string> excluded_ = split(getenv("YT_SCOPE_EXCLUDED_DIRS"));
-    std::vector<std::string> extensions_ = split(getenv("YT_SCOPE_EXTENSIONS"));
-    std::vector<std::string> names_ = split(getenv("YT_SCOPE_NAMES"));
     std::vector<std::string> raw_ = split(getenv("YT_COMPAT_RAW_CLIENTS"));
     std::vector<std::string> scripts_ = split(getenv("YT_COMPAT_SCRIPT_CLIENTS"));
 
   public:
     std::string key;
+    bool encrypt_new = false;
     explicit Policy(const std::string &config) {
         std::ifstream in(config);
         if (!in)
@@ -71,35 +69,16 @@ class Policy {
             auto a = trim(line.substr(0, sep)), b = trim(line.substr(sep + 6));
             if (a == "encryptkey")
                 key = b;
+            else if (a == "new_file_mode") {
+                if (b != "plain" && b != "encrypted")
+                    throw std::runtime_error("invalid new file mode");
+                encrypt_new = b == "encrypted";
+            }
             else if (!a.empty())
                 rules_.push_back({a, b});
         }
         if (key.empty() || key.size() >= 30 || key.find('\0') != key.npos)
             throw std::runtime_error("invalid policy identity");
-    }
-    bool scoped(const std::string &path) const {
-        size_t at = path.size() && path[0] == '/' ? 1 : 0;
-        while (at < path.size()) {
-            auto end = path.find('/', at);
-            if (end == path.npos)
-                break;
-            auto part = path.substr(at, end - at);
-            if (std::find(excluded_.begin(), excluded_.end(), part) != excluded_.end())
-                return false;
-            at = end + 1;
-        }
-        if (extensions_.empty())
-            return true;
-        auto name = path.substr(at);
-        if (std::find(names_.begin(), names_.end(), name) != names_.end())
-            return true;
-        auto dot = name.rfind('.');
-        if (dot == name.npos)
-            return false;
-        auto ext = name.substr(dot);
-        std::transform(ext.begin(), ext.end(), ext.begin(),
-                       [](unsigned char c) { return std::tolower(c); });
-        return std::find(extensions_.begin(), extensions_.end(), ext) != extensions_.end();
     }
     Identity identity(pid_t pid) const {
         Identity result;

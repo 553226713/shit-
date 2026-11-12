@@ -127,7 +127,9 @@ def verify(args):
                 check(expected)
                 result['operations'].append('mmap shared read/write/flush')
             assert run('/usr/bin/head', '-c', '32', cipher) == MAGIC
-            blocked = binary / 'untrusted-writer'; shutil.copy2('/usr/bin/tee', blocked)
+            blocked = binary / 'untrusted-writer'
+            subprocess.run(['cc', '-O2', '-Wall', '-Wextra', '-Werror',
+                            str(ROOT/'engine2/file_write_probe.c'), '-o', str(blocked)], check=True)
             before = disk('Encrypted.java')
             denied = subprocess.run([str(blocked), str(cipher)], input=b'forbidden', capture_output=True)
             assert denied.returncode != 0 and disk('Encrypted.java') == before

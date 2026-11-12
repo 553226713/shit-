@@ -19,6 +19,7 @@ def policy():
     yt_config.SETTINGS_PATH = ROOT / 'config/settings.json'
     yt_config.REMOTE_POLICY_PATH = ROOT / 'config/remote_policy.json'
     result = yt_config.effective_config(yt_config.load_settings(), yt_config.load_remote_policy())
+    result['encryption']['new_file_mode'] = 'plain'
     result['trusted_programs'] = [f'nonmatching-{i}' for i in range(100)] + [
         '*python*', '*node*', '*cat*', '*bash*', '*git*', '*tee*', '*dd*']
     return yt_config.build_sgfs_conf(result)

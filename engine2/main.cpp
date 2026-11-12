@@ -81,6 +81,7 @@ struct Node {
 struct Handle {
     int fd;
     std::shared_ptr<Node> node;
+    std::string path;
     bool passthrough = false, authorized = false, raw = false, append = false, writable = false;
     ~Handle() { close(fd); }
 };
@@ -330,7 +331,7 @@ struct Engine {
         return ::open(proc(n->fd).c_str(), flags | O_CLOEXEC);
     }
     int classify(const std::shared_ptr<Node> &n, const struct stat &st, int fd = -1) {
-        if (!S_ISREG(st.st_mode) || st.st_size < 32 || !policy.scoped(path(n)))
+        if (!S_ISREG(st.st_mode) || st.st_size < 32)
             return 0;
         std::lock_guard g(n->storage->cache);
         auto &a = n->storage->stamp;
@@ -392,7 +393,6 @@ struct Engine {
         if (!dir)
             return ESTALE;
         auto relative = path(dir) + "/" + name;
-        bool scoped = policy.scoped(relative);
         struct stat current{};
         if (fstatat(dir->fd, name, &current, AT_SYMLINK_NOFOLLOW))
             return errno;
@@ -412,10 +412,9 @@ struct Engine {
                     stamp.changed.tv_nsec == current.st_ctim.tv_nsec;
                 // Revalidate the backing inode and timestamps, but do not open
                 // a descriptor just to report unchanged plaintext metadata.
-                // Scope/path equality prevents hardlinks crossing scope rules
-                // from borrowing another path's plaintext classification.
+                // Keep the descriptor reopen path tied to this directory entry.
                 if (n->path == relative && !n->retired &&
-                    (!S_ISREG(current.st_mode) || !scoped || current.st_size < 32 || unchanged_plain)) {
+                    (!S_ISREG(current.st_mode) || current.st_size < 32 || unchanged_plain)) {
                     n->refs++;
                     entry = {};
                     entry.ino = n->ino;
@@ -453,7 +452,7 @@ struct Engine {
         entry.attr = st;
         if (enc == 1 && n->view == 1)
             entry.attr.st_size = std::max<off_t>(0, st.st_size - 1024);
-        // Regular dentries must revalidate, including out-of-scope temporary
+        // Regular dentries must revalidate, including editor temporary
         // files: rename preservation can replace their backing inode when an
         // editor saves over a ciphertext target.
         entry.entry_timeout = S_ISREG(st.st_mode) ? 0 : 1;
@@ -492,6 +491,13 @@ struct Engine {
 };
 static Engine &engine(fuse_req_t r) { return *static_cast<Engine *>(fuse_req_userdata(r)); }
 static Handle *handle(fuse_file_info *fi) { return reinterpret_cast<Handle *>(fi->fh); }
+static bool authorized(fuse_req_t r, Handle *h) {
+    if (fuse_req_ctx(r)->pid == 0)
+        return h->authorized;
+    auto &e = engine(r);
+    auto id = e.policy.identity(fuse_req_ctx(r)->pid);
+    return !id.raw && e.policy.trusted(id, h->path);
+}
 static void reply_error(fuse_req_t r, int e) {
     e = e < 0 ? -e : e;
     switch (e) {
@@ -635,7 +641,7 @@ static void setattr(fuse_req_t r, fuse_ino_t ino, struct stat *st, int mask, fus
     std::unique_lock lock(n->storage->data);
     int error = 0;
     if (mask & FUSE_SET_ATTR_SIZE) {
-        bool decoded = e.decoded(r, n);
+        bool decoded = fi ? authorized(r, handle(fi)) : e.decoded(r, n);
         struct stat real{};
         if (fstat(n->fd, &real))
             error = errno;
@@ -689,6 +695,7 @@ static int open_handle(fuse_req_t r, const std::shared_ptr<Node> &n, fuse_file_i
     h->fd = created_fd;
     auto &e = engine(r);
     std::unique_lock lock(n->storage->data);
+    h->path = e.path(n);
     struct stat st{};
     if (fstat(n->fd, &st))
         return errno;
@@ -700,7 +707,7 @@ static int open_handle(fuse_req_t r, const std::shared_ptr<Node> &n, fuse_file_i
     if (state) {
         auto id = e.policy.identity(fuse_req_ctx(r)->pid);
         h->raw = id.raw;
-        h->authorized = !id.raw && e.policy.trusted(id, e.path(n));
+        h->authorized = !id.raw && e.policy.trusted(id, h->path);
         if ((flags & O_ACCMODE) != O_RDONLY && !h->raw && !h->authorized)
             return EACCES;
         if (h->authorized && state < 0)
@@ -762,9 +769,6 @@ static void open_file(fuse_req_t r, fuse_ino_t ino, fuse_file_info *fi) {
         if (fuse_reply_open(r, fi))
             discard_handle(e, h);
     }
-}
-static bool authorized(fuse_req_t r, Handle *h) {
-    return fuse_req_ctx(r)->pid == 0 ? h->authorized : engine(r).decoded(r, h->node);
 }
 static void read_file(fuse_req_t r, fuse_ino_t ino, size_t size, off_t off, fuse_file_info *fi) {
     Cred c(r);
@@ -861,6 +865,40 @@ static void fsync(fuse_req_t r, fuse_ino_t ino, int data, fuse_file_info *fi) {
     auto fd = handle(fi)->fd;
     reply_error(r, (data ? fdatasync(fd) : ::fsync(fd)) ? errno : 0);
 }
+static int creation_format(fuse_req_t r, const std::string &path, bool &encrypt) {
+    auto &e = engine(r);
+    encrypt = false;
+    if (!e.policy.encrypt_new)
+        return 0;
+    auto id = e.policy.identity(fuse_req_ctx(r)->pid);
+    // VCS raw clients must continue restoring their original stored bytes.
+    if (id.raw)
+        return 0;
+    if (!e.policy.trusted(id, path))
+        return EACCES;
+    encrypt = true;
+    return 0;
+}
+static int write_new_header(Engine &e, int fd) {
+    // Format 301 layout: native BuildCipherHeader (0x407f6c) and the Windows
+    // driver's new-header path (0x14000ebb4). No machine identity is copied.
+    std::array<unsigned char, 1024> header{};
+    std::copy(MAGIC.begin(), MAGIC.end(), header.begin());
+    std::copy(MAGIC.begin(), MAGIC.end(), header.begin() + 32);
+    e.cipher.apply(header.data() + 32, 32, 0);
+    const unsigned char version[] = {0x60, 0x38, 0x58, 0x03};
+    memcpy(header.data() + 65, version, sizeof(version));
+    header[85] = 0x2d;
+    header[86] = 1;
+    memcpy(header.data() + 213, e.policy.key.c_str(), e.policy.key.size() + 1);
+    memcpy(header.data() + 243, "level0", 6);
+    for (size_t i = 243; i < 252; i++)
+        header[i] ^= 0xfd;
+    header[253] = 0x30;
+    memcpy(header.data() + 278, "2020.NewDriver-Pading", 21);
+    memcpy(header.data() + 1019, "[END]", 5);
+    return write_all(fd, header.data(), header.size(), 0);
+}
 static void create(fuse_req_t r, fuse_ino_t parent, const char *name, mode_t mode,
                    fuse_file_info *fi) {
     std::lock_guard namespace_guard(engine(r).namespace_lock);
@@ -871,13 +909,28 @@ static void create(fuse_req_t r, fuse_ino_t parent, const char *name, mode_t mod
         reply_error(r, ESTALE);
         return;
     }
-    int fd = openat(n->fd, name, (fi->flags & ~O_TRUNC) | O_CREAT | O_EXCL | O_CLOEXEC, mode);
+    bool encrypt = false;
+    int error = creation_format(r, e.path(n) + "/" + name, encrypt);
+    if (error) {
+        reply_error(r, error);
+        return;
+    }
+    int flags = fi->flags & ~O_TRUNC;
+    if (encrypt)
+        flags = (flags & ~O_ACCMODE) | O_RDWR;
+    int fd = openat(n->fd, name, flags | O_CREAT | O_EXCL | O_CLOEXEC, mode);
     if (fd < 0) {
         reply_error(r, errno);
         return;
     }
+    if (encrypt && (error = write_new_header(e, fd))) {
+        close(fd);
+        unlinkat(n->fd, name, 0);
+        reply_error(r, error);
+        return;
+    }
     fuse_entry_param entry{};
-    int error = e.entry(r, parent, name, entry);
+    error = e.entry(r, parent, name, entry);
     if (error) {
         close(fd);
         reply_error(r, error);
@@ -927,10 +980,34 @@ static void mkdir(fuse_req_t r, fuse_ino_t parent, const char *name, mode_t mode
 static void mknod(fuse_req_t r, fuse_ino_t parent, const char *name, mode_t mode, dev_t dev) {
     std::lock_guard namespace_guard(engine(r).namespace_lock);
     Cred c(r);
-    auto n = engine(r).get(parent);
+    auto &e = engine(r);
+    auto n = e.get(parent);
     if (!n) {
         reply_error(r, ESTALE);
         return;
+    }
+    if (S_ISREG(mode) && e.policy.encrypt_new) {
+        bool encrypt = false;
+        int error = creation_format(r, e.path(n) + "/" + name, encrypt);
+        if (error) {
+            reply_error(r, error);
+            return;
+        }
+        if (encrypt) {
+            int fd = openat(n->fd, name, O_RDWR | O_CREAT | O_EXCL | O_CLOEXEC, mode);
+            if (fd < 0) {
+                reply_error(r, errno);
+                return;
+            }
+            error = write_new_header(e, fd);
+            close(fd);
+            if (error) {
+                unlinkat(n->fd, name, 0);
+                reply_error(r, error);
+            } else
+                lookup(r, parent, name);
+            return;
+        }
     }
     if (mknodat(n->fd, name, mode, dev))
         reply_error(r, errno);
@@ -985,10 +1062,6 @@ static void link(fuse_req_t r, fuse_ino_t ino, fuse_ino_t parent, const char *na
         reply_error(r, ESTALE);
         return;
     }
-    if (e.policy.scoped(e.path(n)) != e.policy.scoped(e.path(p) + "/" + name)) {
-        reply_error(r, EXDEV);
-        return;
-    }
     if (linkat(AT_FDCWD, Engine::proc(n->fd).c_str(), p->fd, name, AT_SYMLINK_FOLLOW))
         reply_error(r, errno);
     else
@@ -1004,12 +1077,28 @@ static int preserve_rename(Engine &e, fuse_req_t r, const std::shared_ptr<Node> 
         return syscall(SYS_renameat2, from->fd, name, to->fd, target, flags) ? errno : 0;
     };
     auto sourcepath = e.path(from) + "/" + name, targetpath = e.path(to) + "/" + target;
-    if (!e.policy.scoped(targetpath))
-        return native();
     auto id = e.policy.identity(fuse_req_ctx(r)->pid);
     if (id.raw)
         return native();
-    int dest = openat(to->fd, target, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    // Moving an editor's original aside must retain its own storage format,
+    // even when an older plaintext backup already occupies the backup name.
+    if (from->ino == to->ino &&
+        (target == std::string(name) + "~" || target == std::string(name) + "___jb_old___"))
+        return native();
+    int dest = openat(to->fd, target, O_RDONLY | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW);
+    bool destination_missing = dest < 0 && errno == ENOENT;
+    if (destination_missing && from->ino == to->ino) {
+        // Two-step safe writes move the original aside before installing the
+        // staged file. Only paired editor names may inherit a backup's state;
+        // arbitrary new files must keep their ordinary plaintext behavior.
+        std::string backup;
+        if (name == std::string(target) + ".tmp")
+            backup = std::string(target) + "~";
+        else if (name == std::string(target) + "___jb_tmp___")
+            backup = std::string(target) + "___jb_old___";
+        if (!backup.empty())
+            dest = openat(to->fd, backup.c_str(), O_RDONLY | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW);
+    }
     if (dest < 0)
         return errno == ENOENT || errno == ELOOP ? native() : errno;
     struct stat ds{};
@@ -1025,7 +1114,7 @@ static int preserve_rename(Engine &e, fuse_req_t r, const std::shared_ptr<Node> 
     std::array<unsigned char, 1024> header{};
     int de = header_state(dest, header, e.policy);
     close(dest);
-    int source = openat(from->fd, name, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+    int source = openat(from->fd, name, O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC);
     if (source < 0)
         return errno == ELOOP && de ? EOPNOTSUPP : native();
     struct stat ss{};
@@ -1039,21 +1128,21 @@ static int preserve_rename(Engine &e, fuse_req_t r, const std::shared_ptr<Node> 
         return de ? EOPNOTSUPP : native();
     }
     std::array<unsigned char, 1024> src_header{};
-    // A cipher file may use a temporary extension. Signature detection here is
-    // independent of source scope, just as the original preservation engine.
+    // File signatures also identify ciphertext with temporary extensions.
     int se = header_state(source, src_header, e.policy);
     if (se < 0 || de < 0) {
         close(source);
         return se < 0 ? -se : -de;
     }
-    if (se == de) {
+    bool retain_header = e.policy.encrypt_new && de && from->ino == to->ino && src_header != header;
+    if (se == de && !retain_header) {
         close(source);
         return native();
     }
     int error = 0;
     if (!e.policy.trusted(id, targetpath))
         error = EACCES;
-    else if (flags)
+    else if (flags && !(flags == RENAME_NOREPLACE && destination_missing))
         error = flags == RENAME_NOREPLACE ? EEXIST : EOPNOTSUPP;
     else if (from->ino != to->ino || ss.st_nlink != 1)
         error = EOPNOTSUPP;
@@ -1097,10 +1186,12 @@ static int preserve_rename(Engine &e, fuse_req_t r, const std::shared_ptr<Node> 
             error = count < 0 ? errno : EIO;
             break;
         }
-        if (se)
-            e.cipher.apply(data.data(), count, pos + 1024);
-        if (de)
-            e.cipher.apply(data.data(), count, pos + 1024);
+        if (se != de) {
+            if (se)
+                e.cipher.apply(data.data(), count, pos + 1024);
+            if (de)
+                e.cipher.apply(data.data(), count, pos + 1024);
+        }
         error = write_all(out, data.data(), count, pos + (de ? 1024 : 0));
         pos += count;
     }
@@ -1118,7 +1209,7 @@ static int preserve_rename(Engine &e, fuse_req_t r, const std::shared_ptr<Node> 
         error = EAGAIN;
     close(source);
     close(out);
-    if (!error && renameat(to->fd, temp.c_str(), to->fd, target))
+    if (!error && syscall(SYS_renameat2, to->fd, temp.c_str(), to->fd, target, flags))
         error = errno;
     if (!error && unlinkat(from->fd, name, 0))
         error = errno;

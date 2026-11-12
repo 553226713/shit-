@@ -268,22 +268,17 @@ class ClientWindow(Gtk.ApplicationWindow):
         startup_row.append(self.autostart_switch)
         auto_card.append(startup_row)
         auto_card.append(self._directory_controls())
-        scope_expander = Gtk.Expander(label="文件范围：源码、配置和常用文档；跳过依赖、构建及缓存目录")
-        scope_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
-        scope_box.append(muted("目录名在任意层级生效，用英文逗号分隔；扩展名留空表示所有文件类型。排除项按磁盘原样读写。", wrap=True))
-        self.scope_entries = {}
-        for key, title in [('excluded_directories', '排除目录名'),
-                           ('included_extensions', '处理的扩展名'),
-                           ('included_names', '额外处理的文件名')]:
-            scope_box.append(Gtk.Label(label=title, xalign=0))
-            entry = Gtk.Entry(hexpand=True)
-            self.scope_entries[key] = entry
-            scope_box.append(entry)
-        apply_scope = Gtk.Button(label="应用文件范围", halign=Gtk.Align.START)
-        apply_scope.connect('clicked', lambda _button: self._apply_file_scope())
-        scope_box.append(apply_scope)
-        scope_expander.set_child(scope_box)
-        auto_card.append(scope_expander)
+        auto_card.append(muted("监控目录内全部文件参与检查，不按子目录名称、文件名或扩展名排除。明文保持明文，密文按程序权限解密。", wrap=True))
+        creation_row = Gtk.Box(spacing=8)
+        creation_row.append(Gtk.Label(label="新建文件保存格式", xalign=0, hexpand=True))
+        self.new_file_mode = Gtk.DropDown.new_from_strings(["明文（默认）", "加密"])
+        self.new_file_mode.connect("notify::selected", self._mark_dirty)
+        creation_row.append(self.new_file_mode)
+        apply_creation = Gtk.Button(label="应用")
+        apply_creation.connect("clicked", lambda _button: self._apply_new_file_mode())
+        creation_row.append(apply_creation)
+        auto_card.append(creation_row)
+        auto_card.append(muted("只影响之后新建的文件；已有文件和替换保存保持原格式。加密文件由受信程序读写。", wrap=True))
         content.append(auto_card)
 
         policy_card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
@@ -488,14 +483,13 @@ class ClientWindow(Gtk.ApplicationWindow):
 
     def _load_fields(self) -> None:
         server = self.settings["server"]
+        self.new_file_mode.set_selected(1 if self.settings["encryption"]["new_file_mode"] == "encrypted" else 0)
         self.server_host.set_text(server["host"])
         self.auto_update.set_active(bool(server["auto_update"]))
         self.interval.set_value(int(server["update_interval_minutes"]))
         self.use_server_policy.set_active(
             bool(self.settings["local_overrides"]["use_server_policy"])
         )
-        for key, entry in self.scope_entries.items():
-            entry.set_text(', '.join(self.settings['file_scope'][key]))
         self._refresh_dynamic_fields()
         self._set_trusted_text()
         self._refresh_status()
@@ -503,6 +497,7 @@ class ClientWindow(Gtk.ApplicationWindow):
 
     def _collect_fields(self) -> dict[str, Any]:
         source = self.settings["server"]["policy_source"]
+        self.settings["encryption"]["new_file_mode"] = "encrypted" if self.new_file_mode.get_selected() == 1 else "plain"
         buffer = self.trusted_text.get_buffer()
         trusted = buffer.get_text(
             buffer.get_start_iter(), buffer.get_end_iter(), True
@@ -534,15 +529,9 @@ class ClientWindow(Gtk.ApplicationWindow):
         self.settings["local_overrides"]["use_server_policy"] = use_server
         return self.settings
 
-    def _apply_file_scope(self) -> None:
-        from file_scope import normalize_scope
-        try:
-            scope = normalize_scope({key: [item.strip() for item in entry.get_text().split(',') if item.strip()]
-                                     for key, entry in self.scope_entries.items()})
-            self.settings['file_scope'] = scope
-            self._apply_directory_change()
-        except ValueError as error:
-            self._show_error('文件范围设置失败', str(error))
+    def _apply_new_file_mode(self) -> None:
+        if self._save(quiet=True):
+            self.status_detail.set_text("新建文件格式已保存，监控运行时将自动更新")
 
     def _save(self, quiet: bool = False) -> bool:
         try:

@@ -331,6 +331,21 @@ def _run_broker() -> int:
     stopping = False
     worker_failures = {}
     compat_retry = 0
+    mount_retry = {}
+    retry_delay = {}
+    mounted_at = {}
+
+    def retry_mount(directory, reason):
+        delay = min(retry_delay.get(directory, 0) * 2 or 1, 60)
+        retry_delay[directory] = delay
+        mount_retry[directory] = time.monotonic() + delay
+        skipped[str(directory)] = f"{reason}；{delay} 秒后自动重试"
+
+    def mount_status():
+        write_status({"state": "running" if mounts else "idle",
+                      "mounts": [str(item.origin) for item in mounts],
+                      "skipped": dict(skipped), "worker_failures": dict(worker_failures),
+                      "updated_at": yt_config._now()}, uid, gid)
 
     def stop(_signum=None, _frame=None):
         nonlocal stopping
@@ -346,8 +361,9 @@ def _run_broker() -> int:
             try:
                 mounts.append(open_mount(directory, uid, gid, groups,
                                          file_scope=effective.get("file_scope")))
+                mounted_at[directory] = time.monotonic()
             except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as error:
-                skipped[str(directory)] = str(error)
+                retry_mount(directory, str(error))
                 log.exception('Mount failed: path=%s', directory)
         write_status(
             {
@@ -360,7 +376,7 @@ def _run_broker() -> int:
                 "engine_path": str(runtime_engine()),
                 "policy_path": str(runtime_policy()),
                 "error": None,
-                "worker_failures": {},
+                "worker_failures": dict(worker_failures),
             },
             uid,
             gid,
@@ -377,15 +393,40 @@ def _run_broker() -> int:
                     details={'pid':item.process.pid,'exit_code':code,'signal':-code if code<0 else None,
                              'log':str(log_dir/'engine-errors.log' if PACKAGED else item.backing.parent/'fuse.log')}
                     worker_failures[str(item.origin)]=details
-                    skipped[str(item.origin)] = f"加密引擎已退出（{reason}），请检查引擎日志"
                     log.error('Engine exited: path=%s pid=%s exit_code=%s signal=%s log=%s',
                               item.origin, item.process.pid, code, details['signal'], details['log'])
                     close_mount(item)
                     mounts.remove(item)
-                    write_status({"state": "running" if mounts else "idle",
-                                  "mounts": [str(m.origin) for m in mounts],
-                                  "skipped": skipped, "worker_failures":worker_failures,
-                                  "updated_at": yt_config._now()}, uid, gid)
+                    mounted_at.pop(item.origin, None)
+                    retry_mount(item.origin, f"加密引擎已退出（{reason}），请检查引擎日志")
+                    mount_status()
+                elif time.monotonic() - mounted_at[item.origin] >= 60:
+                    retry_delay.pop(item.origin, None)
+            for directory, deadline in list(mount_retry.items()):
+                if stopping or control.stop_requested():
+                    stopping = True
+                    break
+                if time.monotonic() < deadline:
+                    continue
+                try:
+                    item = open_mount(directory, uid, gid, groups,
+                                      file_scope=effective.get("file_scope"))
+                except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as error:
+                    retry_mount(directory, str(error))
+                    log.exception('Mount retry failed: path=%s', directory)
+                else:
+                    mounts.append(item)
+                    mounted_at[directory] = time.monotonic()
+                    mount_retry.pop(directory)
+                    skipped.pop(str(directory), None)
+                    # Keep the last exit details available after recovery.
+                    if str(directory) in worker_failures:
+                        worker_failures[str(directory)] = {
+                            **worker_failures[str(directory)], "recovered_at": yt_config._now()}
+                    log.info('Mount recovered: path=%s pid=%s', directory, item.process.pid)
+                mount_status()
+            if stopping:
+                break
             if time.monotonic() >= compat_retry:
                 try:
                     if compatibility is None:compatibility=GitPatches(uid,gid,groups,log)

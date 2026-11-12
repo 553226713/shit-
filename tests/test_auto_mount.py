@@ -86,6 +86,86 @@ class AutoMountTests(unittest.TestCase):
             self.assertEqual(auto_mount.run_broker(),0)
             self.assertTrue(any('compatibility' in call.args[0] for call in status.call_args_list))
 
+    def run_recovery_scenario(self, outcomes, stop_at):
+        from contextlib import ExitStack
+        import compat.manager
+        with tempfile.TemporaryDirectory() as temporary, ExitStack() as stack:
+            state = Path(temporary)
+            directory = state / 'project'; directory.mkdir()
+            clock = [0]
+            handlers, attempts, closed = {}, [], []
+            def sleep(_):
+                clock[0] += 1
+                if clock[0] >= stop_at:
+                    handlers[auto_mount.signal.SIGTERM]()
+            def open_mount(*args, **kwargs):
+                attempts.append(clock[0])
+                outcome = outcomes.pop(0)
+                if isinstance(outcome, Exception):
+                    raise outcome
+                item = Mock(origin=directory, backing=state/'session/backing')
+                if isinstance(outcome, list):
+                    item.process.poll.side_effect = outcome
+                else:
+                    item.process.poll.return_value = outcome
+                item.process.pid = 123
+                return item
+            patches = [
+                patch.object(auto_mount, 'STATE', state), patch.object(auto_mount, 'LOG', state/'log'),
+                patch.object(auto_mount, 'PACKAGED', False),
+                patch.object(auto_mount.yt_config, 'load_settings', return_value={}),
+                patch.object(auto_mount.yt_config, 'load_remote_policy', return_value={}),
+                patch.object(auto_mount.yt_config, 'effective_config', return_value={'directories': []}),
+                patch.object(auto_mount, 'top_level_directories', return_value=[directory]),
+                patch.dict(auto_mount.os.environ, {'SUDO_UID': '1000', 'SUDO_GID': '1000'}),
+                patch.object(auto_mount.os, 'chown'),
+                patch.object(auto_mount.os, 'getgrouplist', return_value=[1000]),
+                patch.object(auto_mount.signal, 'signal', side_effect=lambda sig, cb: handlers.update({sig: cb})),
+                patch.object(auto_mount.time, 'monotonic', side_effect=lambda: clock[0]),
+                patch.object(auto_mount.time, 'sleep', side_effect=sleep),
+                patch.object(auto_mount, 'open_mount', side_effect=open_mount),
+                patch.object(auto_mount, 'close_mount', side_effect=lambda item: closed.append(item)),
+                patch.object(compat.manager, 'GitPatches'),
+            ]
+            for item in patches: stack.enter_context(item)
+            status = stack.enter_context(patch.object(auto_mount, 'write_status'))
+            self.assertEqual(auto_mount.run_broker(), 0)
+            return attempts, [call.args[0] for call in status.call_args_list], closed, str(directory)
+
+    def test_worker_recovers_after_clean_exit_or_signal_and_transient_mount_failure(self):
+        for code in (0, -9):
+            with self.subTest(code=code):
+                attempts, payloads, closed, directory = self.run_recovery_scenario(
+                    [code, OSError('temporary mount failure'), None], 5)
+                self.assertEqual(attempts, [0, 1, 3])
+                recovered = [p for p in payloads if directory in p.get('worker_failures', {})
+                             and 'recovered_at' in p['worker_failures'][directory]]
+                self.assertTrue(recovered)
+                self.assertEqual(recovered[0]['mounts'], [directory])
+                self.assertNotIn(directory, recovered[0]['skipped'])
+                self.assertEqual(recovered[0]['worker_failures'][directory]['exit_code'], code)
+                self.assertEqual(len(closed), 2)
+
+    def test_startup_mount_failure_recovers(self):
+        attempts, payloads, _, directory = self.run_recovery_scenario([OSError('busy'), None], 3)
+        self.assertEqual(attempts, [0, 1])
+        self.assertTrue(any(p.get('mounts') == [directory] and not p['skipped'] for p in payloads))
+
+    def test_repeated_worker_exits_back_off_to_sixty_seconds(self):
+        attempts, _, closed, _ = self.run_recovery_scenario([1] * 8, 131)
+        self.assertEqual(attempts, [0, 1, 4, 9, 18, 35, 68, 129])
+        self.assertEqual(len(closed), 8)
+
+    def test_stop_cancels_pending_mount_recovery(self):
+        attempts, payloads, closed, _ = self.run_recovery_scenario([1], 1)
+        self.assertEqual(attempts, [0])
+        self.assertEqual(len(closed), 1)
+        self.assertEqual(payloads[-1]['state'], 'stopped')
+
+    def test_stable_worker_resets_recovery_backoff(self):
+        attempts, _, _, _ = self.run_recovery_scenario([1, [None] * 61 + [-9], None], 66)
+        self.assertEqual(attempts, [0, 1, 64])
+
     def test_recovery_only_recognizes_this_clients_fuse_mount(self):
         with patch.object(Path, 'is_dir', return_value=True), patch.object(Path, 'read_text', return_value='1 2 0:1 / /project rw - fuse sgfs rw\n'):
             self.assertTrue(auto_mount.disconnected_client_mount(Path('/project')))

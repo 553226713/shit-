@@ -158,6 +158,7 @@ def default_settings() -> dict[str, Any]:
         "encryption": {
             "key": legacy_key,
             "file_pattern": str(file_patterns[0]) if file_patterns else DEFAULT_FILE_PATTERN,
+            "new_file_mode": "plain",
         },
         "trusted_programs": legacy_programs or list(DEFAULT_TRUSTED_PROGRAMS),
         "file_scope": normalize_scope(),
@@ -226,6 +227,10 @@ def normalize_settings(raw: dict[str, Any] | None) -> dict[str, Any]:
         settings["encryption"]["file_pattern"] = str(
             encryption.get("file_pattern", DEFAULT_FILE_PATTERN)
         ).strip() or DEFAULT_FILE_PATTERN
+        mode = encryption.get("new_file_mode", "plain")
+        if mode not in ("plain", "encrypted"):
+            raise ValueError("新建文件格式必须为明文或加密")
+        settings["encryption"]["new_file_mode"] = mode
 
     if "trusted_programs" in raw:
         settings["trusted_programs"] = _string_list(raw.get("trusted_programs"))
@@ -379,7 +384,7 @@ def parse_sgfs_conf(path: Path) -> tuple[str, list[str], list[str]]:
         left, right = left.strip(), right.strip()
         if left == "encryptkey":
             key = right
-        elif left:
+        elif left and left != "new_file_mode":
             programs.append(left)
             if right:
                 patterns.append(right)
@@ -528,6 +533,7 @@ def effective_config(
         "encryption": {
             "key": key,
             "file_pattern": file_pattern or DEFAULT_FILE_PATTERN,
+            "new_file_mode": settings["encryption"]["new_file_mode"],
             "key_source": (
                 "server" if applied_remote and applied_remote["encryption_key"] else "local"
             ),
@@ -553,7 +559,10 @@ def build_sgfs_conf(effective: dict[str, Any]) -> str:
     pattern = str(effective["encryption"].get("file_pattern", DEFAULT_FILE_PATTERN)).strip()
     if not pattern or "\n" in pattern or RULE_SEPARATOR in pattern:
         raise ValueError("文件规则无效")
-    lines = [f"encryptkey {RULE_SEPARATOR} {key}"]
+    mode = effective["encryption"].get("new_file_mode", "plain")
+    if mode not in ("plain", "encrypted"):
+        raise ValueError("新建文件格式必须为明文或加密")
+    lines = [f"encryptkey {RULE_SEPARATOR} {key}", f"new_file_mode {RULE_SEPARATOR} {mode}"]
     for program in effective["trusted_programs"]:
         if "\n" in program or RULE_SEPARATOR in program:
             raise ValueError("受信程序规则包含非法字符")
