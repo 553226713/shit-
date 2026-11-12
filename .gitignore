@@ -1,5 +1,6 @@
 # Local device configuration, policy keys, runtime data and mounted backings.
 /state/
+/dist/
 /config/*
 !/config/policy.example.json
 !/config/global_view_policy.json

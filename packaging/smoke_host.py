@@ -9,7 +9,7 @@ import tempfile
 import time
 
 ROOT = Path(__file__).resolve().parents[1]
-PACKAGE = ROOT.parent / 'dist' / ('shit-encryption_'+(ROOT/'VERSION').read_text().strip()+'_amd64.deb')
+PACKAGE = ROOT / 'dist' / ('shit-encryption_'+(ROOT/'VERSION').read_text().strip()+'_amd64.deb')
 
 
 def privileged(*args):

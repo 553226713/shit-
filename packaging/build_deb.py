@@ -16,7 +16,7 @@ from windows_policy import NATIVE_SHA256
 from yt_config import discover_native_client
 
 VERSION = (ROOT / 'VERSION').read_text(encoding='utf-8').strip()
-OUTPUT = ROOT.parent / 'dist'
+OUTPUT = ROOT / 'dist'
 MODULES = ['runtime_paths.py', 'yt_control.py', 'yt_config.py', 'system_tray.py',
            'auto_mount.py', 'auto_service.py', 'namespace_view.py', 'broker_control.py',
            'windows_policy.py', 'file_scope.py', 'error_log.py',

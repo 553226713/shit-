@@ -30,7 +30,7 @@ export YT_NATIVE_CLIENT_ROOT=/absolute/path/to/native-client
 python3 packaging/build_deb.py
 ```
 
-安装包输出至仓库上一级的 `dist/`。其他构建工具和依赖见 [构建脚本](packaging/build_deb.py)。
+安装包、安装说明和校验文件默认输出至当前项目目录下的 `dist/`。其他构建工具和依赖见 [构建脚本](packaging/build_deb.py)。
 
 ## 验证
 
