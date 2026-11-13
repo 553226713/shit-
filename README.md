@@ -1,15 +1,15 @@
 # shit加密
 
-Linux 桌面文件加解密客户端，当前版本 **1.0.9**。
+Linux 桌面文件加解密客户端，当前版本 **1.0.10**。
 
-配置监控目录后，通过 FUSE 在原路径提供文件视图。监控目录内不按目录名、文件名或扩展名排除；已有明文和密文保持原有格式。新建文件可选明文或加密，默认明文。解密仍受程序权限和服务器策略约束。
+配置监控目录后，通过 FUSE 在原路径提供文件视图。监控目录内不按目录名、文件名或扩展名排除；已有明文和密文保持原有格式。新建文件可选明文或加密，默认明文。解密仍受程序权限和服务器策略约束。重命名保留源文件状态，临时文件替换不会继承目标格式；版本控制程序也按普通授权规则访问，受信程序可能提交明文。
 
 ## 使用
 
 安装构建出的 amd64 安装包：
 
 ```bash
-sudo apt install ./shit-encryption_1.0.9_amd64.deb
+sudo apt install ./shit-encryption_1.0.10_amd64.deb
 ```
 
 从应用列表打开“shit加密”，配置服务器、同步策略并添加监控目录。详细说明见 [安装说明](packaging/安装说明.txt) 和 [使用文档](USAGE.txt)。
@@ -37,6 +37,7 @@ python3 packaging/build_deb.py
 ```bash
 python3 -m unittest discover -s tests
 python3 engine2/verify_editor_saves.py
+python3 engine2/verify_permissions.py
 python3 engine2/verify_new_file_mode.py
 ```
 

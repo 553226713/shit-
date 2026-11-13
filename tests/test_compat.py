@@ -6,7 +6,7 @@ import time
 import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from compat.registry import environment
+from file_scope import scope_environment
 from compat.manager import GitPatches
 from compat.git import git
 from compat.textconv import MAGIC
@@ -15,12 +15,12 @@ from unittest.mock import patch
 
 
 class CompatibilityTests(unittest.TestCase):
-    def test_modules_can_be_disabled_or_selected_independently(self):
-        self.assertEqual(environment([]), {'YT_COMPAT_RAW_CLIENTS': '', 'YT_COMPAT_SCRIPT_CLIENTS': ''})
-        self.assertEqual(environment(['git'])['YT_COMPAT_RAW_CLIENTS'], 'git,git-*')
-        self.assertNotIn('svn', environment(['git'])['YT_COMPAT_RAW_CLIENTS'])
-        self.assertEqual(environment(['hg'])['YT_COMPAT_SCRIPT_CLIENTS'], 'hg,hg.py')
-        with self.assertRaises(KeyError): environment(['not-a-module'])
+    def test_process_view_overrides_are_not_forwarded(self):
+        with patch.dict(os.environ, {'YT_COMPAT_RAW_CLIENTS': 'git',
+                                    'YT_COMPAT_SCRIPT_CLIENTS': 'hg.py'}):
+            environment = scope_environment()
+        self.assertNotIn('YT_COMPAT_RAW_CLIENTS', environment)
+        self.assertNotIn('YT_COMPAT_SCRIPT_CLIENTS', environment)
 
     def test_repository_patch_refreshes_on_index_change_without_touching_index(self):
         with tempfile.TemporaryDirectory() as tmp:

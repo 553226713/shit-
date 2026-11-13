@@ -45,8 +45,13 @@ def verify():
         config=base/'config';config.mkdir()
         project=base/'data';project.mkdir()
         denied=base/'no-permission'
-        raw=(ROOT/'state/performance-before/Encrypted.java').read_bytes()
-        key=raw[213:243].split(b'\0',1)[0].decode()
+        key='package-smoke-identity'
+        header=bytearray(1024)
+        header[:32]=bytes.fromhex('6e7e5a6d0089da16e3b351ea53aafb8bf665ef5aa662a08765f64e627500675c')
+        header[85:89]=bytes([45,1,0,0])
+        header[213:214+len(key)]=key.encode()+b'\0'
+        header[1019:]=b'[END]'
+        raw=bytes(header)
         encrypted=project/'Encrypted.java';encrypted.write_bytes(raw)
         (config/'settings.json').write_text(json.dumps({
             'encryption':{'key':key},'trusted_programs':['python3','python3.*'],
@@ -82,27 +87,30 @@ else:
                         if status.exists() and json.loads(status.read_text()).get('state')=='running':break
                         time.sleep(.1)
                     payload=json.loads(status.read_text())
-                    assert payload['mounts']==[str(project)],payload
+                    assert set(payload['mounts'])=={str(project),str(denied)},payload
                     assert payload['engine_path']==str(app/'vendor/ytfs-engine2'),payload
                     assert payload['policy_path']==str(runtime/'sgfs.conf'),payload
                     assert not (runtime/'bin').exists()
                     assert str(base/'missing') in payload['skipped'],payload
-                    assert '权限' in payload['skipped'][str(denied)],payload
+                    try:list(denied.iterdir())
+                    except PermissionError:pass
+                    else:raise AssertionError('system permissions were bypassed')
                     file=project/'test.txt';file.write_text('package file access test')
                     assert file.read_text()=='package file access test'
                     file.write_text('updated file');assert file.read_text()=='updated file'
                     expected=subprocess.check_output([str(app/'vendor/ytfs-textconv')],input=raw[1024:])
                     assert encrypted.read_bytes()==expected
                     expected+=b'\n// packaged engine write\n';encrypted.write_bytes(expected)
+                    direct=disk();assert direct[:1024]==raw[:1024]
+                    assert subprocess.check_output([str(app/'vendor/ytfs-textconv')],input=direct[1024:])==expected
                     stage=project/'.save.tmp';stage.write_bytes(expected);stage.replace(encrypted)
                     with encrypted.open('r+b') as stream:
                         with mmap.mmap(stream.fileno(),0) as mapped:
                             assert mapped[:]==expected;mapped[:2]=b'//';mapped.flush()
                     expected=b'//'+expected[2:]
-                    saved=disk();assert saved[:1024]==raw[:1024]
-                    assert subprocess.check_output([str(app/'vendor/ytfs-textconv')],input=saved[1024:])==expected
-                    print('PASS: root-owned data mount allowed by supplementary-group access; unreadable/unwritable directory rejected')
-                    print('PASS: packaged FUSE: plain/encrypted read/write, atomic save, mmap, original 301 header')
+                    saved=disk();assert saved==expected
+                    print('PASS: root-owned data mount allowed by supplementary-group access; inaccessible directory retains system permissions')
+                    print('PASS: packaged FUSE: plain/encrypted read/write, native atomic replacement, mmap, original 301 header for direct writes')
                     if os.environ.get('YT_PACKAGE_TEST_KILL_WORKER')=='1':
                         selector="from pathlib import Path;import sys;pid=sys.argv[1];children=Path('/proc/'+pid+'/task/'+pid+'/children').read_text().split();print(next(p for p in children if b'ytfs-engine2' in Path('/proc/'+p+'/cmdline').read_bytes()))"
                         child=subprocess.check_output(['sudo','-n','/usr/bin/python3','-c',selector,str(payload['pid'])]).decode().strip()

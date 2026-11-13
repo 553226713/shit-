@@ -1,4 +1,4 @@
-"""Exercise editor saves and Git ciphertext transport on a disposable FUSE mount.
+"""Exercise editor saves and policy-controlled Git transport on a disposable FUSE mount.
 
 Requires sudo -n. The source repository and its index are read only. A remote
 push is performed only with --remote; the unique verification branch is kept.
@@ -35,9 +35,9 @@ def digest(data):
     return hashlib.sha256(data).hexdigest()
 
 
-def broker(work, engine, compat_modules=None):
+def broker(work, engine):
     from engine2.testing import broker as engine_broker
-    return engine_broker(work, engine, compat_modules)
+    return engine_broker(work, engine)
 
 
 def verify(args):
@@ -46,8 +46,9 @@ def verify(args):
         yt_config.SETTINGS_PATH = args.config_dir / 'settings.json'
         yt_config.REMOTE_POLICY_PATH = args.config_dir / 'remote_policy.json'
     effective = yt_config.effective_config(yt_config.load_settings(), yt_config.load_remote_policy())
-    # Deliberately trust Git: the disk view must override broad legacy policies.
+    # Git follows the configured trusted plaintext view like other programs.
     effective['trusted_programs'] += ['*git*', '*python*']
+    effective['encryption']['new_file_mode'] = 'plain'
     source = args.repo.resolve()
     relative = args.path
     assert not relative.is_absolute() and '..' not in relative.parts
@@ -74,7 +75,7 @@ def verify(args):
         git(project, 'read-tree', 'HEAD')
         git(project, 'config', 'user.name', 'shit-encryption verification')
         git(project, 'config', 'user.email', 'verification@localhost')
-        file = project / relative; file.parent.mkdir(parents=True)
+        file = project / relative; file.parent.mkdir(parents=True, exist_ok=True)
         file.write_bytes(original)
         process = subprocess.Popen(['sudo', '-n', sys.executable, str(Path(__file__).resolve()),
                                     '--broker', str(work), str(engine)])
@@ -95,9 +96,9 @@ def verify(args):
                 display = enable(project, args.textconv)
                 assert display['encrypted_text_files'] > 0
                 assert git(project, 'show', '--textconv', 'HEAD:' + str(relative)) == plain
-            raw_oid = run('git', '-C', str(project), 'hash-object', '--stdin', data=original).strip()
-            assert git(project, 'hash-object', str(relative)).strip() == raw_oid, 'Git reads plaintext: push would leak source'
-            # Save directly, stage, then restore using Git's raw write view.
+            plain_oid = run('git', '-C', str(project), 'hash-object', '--stdin', data=plain).strip()
+            assert git(project, 'hash-object', str(relative)).strip() == plain_oid
+            # Direct writes preserve encryption; trusted Git stages plaintext.
             file.write_bytes(plain + b'\n// direct-save verification\n')
             assert file.read_bytes() == plain + b'\n// direct-save verification\n'
             if args.textconv:
@@ -107,9 +108,10 @@ def verify(args):
                 assert project in index_watch.changed(), 'Atomic index replacement event missing through FUSE'
                 result['fuse_index_events_verified'] = True
             direct = git(project, 'show', ':' + str(relative))
-            assert direct.startswith(MAGIC) and len(direct) == len(file.read_bytes()) + 1024
-            git(project, 'restore', '--source=HEAD', '--staged', '--worktree', '--', str(relative))
-            assert file.read_bytes() == plain
+            assert direct == plain + b'\n// direct-save verification\n'
+            file.write_bytes(b'uncommitted change')
+            git(project, 'restore', '--worktree', '--', str(relative))
+            assert file.read_bytes() == direct
             # Save like an editor: a plaintext sibling replaces an encrypted target.
             marker = ('\n// shit-encryption ciphertext roundtrip ' + work.name + '\n').encode()
             expected = plain + marker
@@ -121,8 +123,7 @@ def verify(args):
             assert file.read_bytes() == expected
             git(project, 'add', '--', str(relative))
             staged = git(project, 'show', ':' + str(relative))
-            assert staged.startswith(MAGIC) and len(staged) == len(expected) + 1024
-            assert marker not in staged and expected not in staged
+            assert staged == expected
             if args.textconv:
                 assert marker.strip() in git(project, 'diff', '--cached', '--', str(relative))
                 assert b'Binary files' in git(project, 'diff', '--no-textconv', '--cached', '--', str(relative))
@@ -140,7 +141,7 @@ def verify(args):
                 assert not git(project, 'for-each-ref', '--format=%(refname)', 'refs/notes/textconv')
                 result.update(working_diff_plaintext=True, staged_diff_plaintext=True,
                               history_show_log_blame_plaintext=True, multichunk_unicode_display=True,
-                              raw_git_objects_still_encrypted=True, no_textconv_cache_objects=True)
+                              git_objects_follow_plaintext_policy=True, no_textconv_cache_objects=True)
             remote = args.remote
             if not remote:
                 remote = str(work / 'remote.git')
@@ -153,23 +154,23 @@ def verify(args):
             git(fetched, 'fetch', '-q', '--no-tags', remote, 'refs/heads/' + branch)
             assert git(fetched, 'rev-parse', 'FETCH_HEAD').decode().strip() == commit
             received = git(fetched, 'show', 'FETCH_HEAD:' + str(relative))
-            assert received == staged and received.startswith(MAGIC)
-            # A fetched ciphertext copy still decrypts to the exact editor content.
+            assert received == staged == expected
+            # A fetched copy retains the policy-visible content.
             raw_copy = project / '.git/received.java'
             raw_copy.write_bytes(received)
             fetched_view = project / 'Received.java'
-            # Outside-scope .git -> ordinary path preserves incoming raw bytes.
+            # Cross-directory rename preserves the incoming source bytes.
             raw_copy.replace(fetched_view)
             assert fetched_view.read_bytes() == expected
             git(project, 'restore', '--source=HEAD', '--worktree', '--', str(relative))
             assert file.read_bytes() == expected
             assert not git(project, 'status', '--porcelain', '--', str(relative))
-            result.update(direct_save_encrypted=True, atomic_save_encrypted=True,
-                          git_stage_encrypted=True, git_checkout_roundtrip=True,
+            result.update(direct_save_preserves_encryption=True, atomic_save_preserves_plain_source=True,
+                          git_stage_matches_trusted_view=True, git_checkout_roundtrip=True,
                           remote_verified=True, remote=remote if args.remote else 'disposable local bare repository',
                           branch=branch, commit=commit, changed_paths=changed,
                           remote_blob_sha256=digest(received), remote_blob_size=len(received),
-                          plaintext_size=len(expected), format_301=int.from_bytes(received[85:89], 'little') == 301,
+                          plaintext_size=len(expected), history_contains_plaintext=received == expected,
                           fetched_decrypt_matches=True)
         finally:
             if index_watch is not None:index_watch.close()

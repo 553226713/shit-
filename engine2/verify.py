@@ -102,11 +102,11 @@ def verify(args):
         assert len(lines)==480 and len(set(lines))==480
         assert independently_decode(shared.name)==shared.read_bytes()
         result['parallel_append_atomic']=True
-        # Converting an encrypted source over a plain destination retains plain.
+        # Rename preserves the source inode and its encrypted storage.
         (project/'Cipher2.java').replace(plain)
-        assert disk(plain.name)==expected['Cipher2.java']
+        assert disk(plain.name).startswith(MAGIC)
         assert plain.read_bytes()==expected['Cipher2.java']
-        result['encrypted_source_over_plain_target_keeps_plain']=True
+        result['rename_preserves_encrypted_source']=True
         # Ordinary filesystem metadata operations remain available.
         folder=project/'folder';folder.mkdir();(folder/'nested').mkdir()
         f=folder/'new.txt';f.write_bytes(b'test');f.chmod(0o640)

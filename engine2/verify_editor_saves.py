@@ -65,7 +65,8 @@ def verify(engine):
         stage = project/'atomic-save.tmp'
         stage.write_bytes(b'class Atomic {}\n')
         stage.replace(atomic)
-        check(atomic, b'class Atomic {}\n')
+        assert disk(atomic.name) == b'class Atomic {}\n'
+        assert atomic.read_bytes() == b'class Atomic {}\n'
         results['atomic_replace'] = True
         # Keep a descriptor open across rename to an editor backup name.
         path = project/'Handle.java'
@@ -99,7 +100,7 @@ def verify(engine):
                 stage.replace(path)
                 backup.unlink()
                 stored = disk(name)
-                results[name] = stored.startswith(MAGIC) and len(stored) == len(expected) + 1024 and path.read_bytes() == expected
+                results[name] = stored == expected and path.read_bytes() == expected
                 if not results[name]:
                     break
         # Ordinary fresh and plain files must remain plain, even with a stale
@@ -114,6 +115,30 @@ def verify(engine):
         ordinary.replace(stale)
         assert disk(stale.name) == b'ordinary new file'
         results['new_files_stay_plain'] = True
+        # Rename moves the inode unchanged for every name and directory.
+        left = project/'left'; left.mkdir()
+        right = project/'right'; right.mkdir()
+        for index, suffix in enumerate(('~', '.tmp', '___jb_tmp___', '___jb_old___', '.anything')):
+            source = left/f'source{index}'
+            source.write_bytes(header)
+            before = source.stat().st_ino
+            alias = left/f'alias{index}'
+            os.link(source, alias)
+            target = right/f'target{suffix}'
+            target.write_bytes(b'old plaintext target')
+            source.replace(target)
+            assert target.stat().st_ino == alias.stat().st_ino == before
+            assert disk(str(target.relative_to(project))) == bytes(header)
+            assert target.read_bytes() == b''
+        results['cross_directory_hardlinks_and_all_names_keep_source_inode'] = True
+        import ctypes
+        a, b = left/'exchange', right/'exchange'
+        a.write_bytes(header); b.write_bytes(b'plain exchange')
+        libc = ctypes.CDLL(None, use_errno=True)
+        assert libc.renameat2(-100, os.fsencode(a), -100, os.fsencode(b), 2) == 0, ctypes.get_errno()
+        assert a.read_bytes() == b'plain exchange'
+        assert disk(str(b.relative_to(project))) == bytes(header)
+        results['exchange_between_plain_and_encrypted_files'] = True
         plain = project/'Plain.java'
         plain.write_bytes(b'old plain')
         plain_stage = project/'Plain.java.tmp'
@@ -127,7 +152,8 @@ def verify(engine):
         subprocess.run(['java', '-cp', str(binary), 'EditorSaveProbe', str(project)], check=True, timeout=40)
         for i in range(8):
             expected = (f'// 保存 {i}:7\n'.encode()) * 500
-            check(project/f'Jvm{i}.java', expected)
+            assert disk(f'Jvm{i}.java') == expected
+            assert (project/f'Jvm{i}.java').read_bytes() == expected
         results['java_nio_parallel_safe_saves_and_mmap'] = True
         fifo = project/'Fifo.java'
         os.mkfifo(fifo)

@@ -9,7 +9,7 @@ import time
 
 
 @contextmanager
-def mounted(work, executable, compat_modules=None):
+def mounted(work, executable):
     if os.geteuid() != 0:
         raise RuntimeError('The isolated broker must run through sudo')
     import auto_mount
@@ -18,7 +18,7 @@ def mounted(work, executable, compat_modules=None):
     item = auto_mount.open_mount(
         work / 'project', uid, gid,
         os.getgrouplist(pwd.getpwuid(uid).pw_name, gid), executable,
-        compat_modules=compat_modules, policy_path=executable.parent/'sgfs.conf')
+        policy_path=executable.parent/'sgfs.conf')
     try:
         yield item.process
     finally:
@@ -31,8 +31,8 @@ def mounted(work, executable, compat_modules=None):
                 shutil.copy2(source, dest); os.chown(dest, uid, gid)
 
 
-def broker(work, executable, compat_modules=None):
-    with mounted(work, executable, compat_modules) as process:
+def broker(work, executable):
+    with mounted(work, executable) as process:
         (work / 'worker.json').write_text(__import__('json').dumps({'pid': process.pid}))
         (work / 'ready').touch()
         while not (work / 'stop').exists():

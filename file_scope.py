@@ -13,10 +13,11 @@ def normalize_scope(raw=None):
     return {key: list(value) for key, value in DEFAULT_SCOPE.items()}
 
 
-def scope_environment(scope=None, compat_modules=None):
-    from compat.registry import environment
-    return dict(os.environ,
-        **environment(compat_modules),
+def scope_environment(scope=None):
+    environment = dict(os.environ)
+    for key in ('YT_COMPAT_RAW_CLIENTS', 'YT_COMPAT_SCRIPT_CLIENTS'):
+        environment.pop(key, None)
+    return dict(environment,
         YT_SCOPE_EXCLUDED_DIRS='',
         YT_SCOPE_EXTENSIONS='',
         YT_SCOPE_NAMES='')

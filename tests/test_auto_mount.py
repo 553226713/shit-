@@ -21,16 +21,14 @@ class AutoMountTests(unittest.TestCase):
             self.assertEqual(selected, [good])
             self.assertEqual(skipped[str(missing)], '目录不存在')
 
-    def test_effective_access_not_directory_owner_controls_selection(self):
+    def test_configured_directories_need_no_write_permission_or_path_allowlist(self):
         with tempfile.TemporaryDirectory() as directory:
-            path=Path(directory)/'data';path.mkdir()
-            effective={'directories':[{'path':str(path),'enabled':True}]}
-            for allowed in (True, False):
-                with self.subTest(allowed=allowed), patch.object(auto_mount.os,'access',return_value=allowed) as access:
-                    skipped={};result=auto_mount.top_level_directories(effective,skipped)
-                    self.assertEqual(result,[path] if allowed else [])
-                    access.assert_called_once_with(path,auto_mount.os.R_OK|auto_mount.os.W_OK|auto_mount.os.X_OK,effective_ids=True)
-                    if not allowed:self.assertIn('权限',skipped[str(path)])
+            path = Path(directory) / 'read-only'; path.mkdir(); path.chmod(0o555)
+            for selected in (path, Path('/tmp')):
+                with self.subTest(path=selected), patch.object(auto_mount.os, 'access',
+                        side_effect=AssertionError('extra directory access filter')):
+                    self.assertEqual(auto_mount.top_level_directories({'directories': [
+                        {'path': str(selected), 'enabled': True}]}), [selected.resolve()])
 
     def test_broker_isolates_mount_failure_and_exited_process(self):
         from contextlib import ExitStack

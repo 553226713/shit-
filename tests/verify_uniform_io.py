@@ -23,6 +23,7 @@ def verify(args):
     yt_config.SETTINGS_PATH = args.config_dir / 'settings.json'
     yt_config.REMOTE_POLICY_PATH = args.config_dir / 'remote_policy.json'
     effective = yt_config.effective_config(yt_config.load_settings(), yt_config.load_remote_policy())
+    effective['encryption']['new_file_mode'] = 'plain'
     effective['trusted_programs'] = ['*python*', '*node*', '*cat*', '*bash*', '*git*',
                                      '*tee*', '*dd*', '*perl*', '*sed*', '*awk*']
     def run(*command, data=None):
@@ -117,8 +118,14 @@ def verify(args):
             expected += b'\0' * 20; check(expected)
             result['operations'].append('truncate extension zero-fill')
             stage = cipher.with_name('.save.tmp'); expected = plain + b'\n// atomic save\n'
-            stage.write_bytes(expected); stage.replace(cipher); check(expected)
-            result['operations'].append('atomic sibling replacement')
+            stage.write_bytes(expected); stage.replace(cipher)
+            assert disk('Encrypted.java') == expected
+            assert cipher.read_bytes() == expected
+            result['operations'].append('atomic replacement preserves plaintext source')
+            # Restore a ciphertext fixture through the backing descriptor for subsequent encrypted I/O checks.
+            fd = os.open('Encrypted.java', os.O_WRONLY | os.O_TRUNC, dir_fd=raw_fd)
+            with os.fdopen(fd, 'wb') as stream: stream.write(raw)
+            cipher.write_bytes(expected); check(expected)
             with cipher.open('r+b') as stream:
                 with mmap.mmap(stream.fileno(), 0) as mapping:
                     assert mapping[:] == expected
@@ -155,7 +162,7 @@ def verify(args):
 
 
 if __name__ == '__main__':
-    if len(sys.argv)>1 and sys.argv[1]=='--broker': broker(Path(sys.argv[2]), Path(sys.argv[3]), compat_modules=[])
+    if len(sys.argv)>1 and sys.argv[1]=='--broker': broker(Path(sys.argv[2]), Path(sys.argv[3]))
     else:
         parser=argparse.ArgumentParser(description=__doc__)
         parser.add_argument('--engine',type=Path,default=ROOT/'state/engine2/ytfs-engine2')

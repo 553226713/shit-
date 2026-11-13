@@ -1,4 +1,4 @@
-Engine 2 — local C++ FUSE engine (application version 1.0.9)
+Engine 2 — local C++ FUSE engine (application version 1.0.10)
 
 Source and installed builds use only this engine; the old engine, callback patcher and executable backups were deleted.
 The original vendor filesystem executable was replaced by a hash-verified 3861
@@ -35,19 +35,21 @@ A file's original 301 header is preserved. Existing plain files stay plain.
 New regular files default to plain; the local encryption.new_file_mode setting
 can select encrypted. This creates a format-301 header before publishing the
 file and encrypts its I/O. Untrusted ordinary creators are denied in encrypted
-mode; existing VCS raw clients retain their original-byte restore behavior.
+mode. Program names do not grant raw-write exemptions.
 Cipher tables initialize once; mutable stream contexts are thread-local.
 Independent files run concurrently. An inode's writes/append/truncation serialize.
 Lookup and open references govern descriptor/node lifetime. There is no added
 address-space/memory limit or Git mapping-window limit. Open-file soft limits
 are raised to the existing hard limit for large repositories.
 Root privilege is retained for kernel passthrough registration; request fsuid/
-fsgid and kernel default_permissions enforce backing access. Only the configured
-user and root requests are accepted. Privileged signature inspection does not
+fsgid, per-request supplementary groups and kernel default_permissions enforce
+backing access for all users,
+including container users. Privileged signature inspection does not
 provide file contents to clients lacking read permission.
 
 Verification (disposable mounts; source repositories remain untouched):
   python3 linux-client/engine2/verify.py
+  python3 linux-client/engine2/verify_permissions.py
   python3 linux-client/engine2/verify_editor_saves.py  # also requires a JDK
   python3 linux-client/engine2/verify_new_file_mode.py  # original Windows arithmetic oracle
   python3 linux-client/engine2/benchmark.py --repeat 3
@@ -64,13 +66,14 @@ Limits:
 Zed UI responsiveness is tested by the user; parallel scanning is a surrogate,
 not a claim that a real Zed multi-project run has passed. Metadata still passes
 through FUSE. Per-inode state and descriptors grow with the kernel inode cache.
-Encrypted/plain replacement conversion supports ordinary sibling editor saves;
-cross-directory conversion, exchange and multiply-linked conversion are rejected
-before mutation. File data and basic mode are preserved by conversion; arbitrary
-source xattrs/ACLs are not copied by that conversion path. Advanced fallocate,
-copy_file_range and ioctl operations may require caller fallback. Git's existing
-read-only display adapter remains separate from core encryption. SVN/Hg tests
-cover encrypted storage and restore, not plaintext history display or merges.
+Rename delegates to renameat2 and preserves the source inode, bytes, links,
+xattrs and encryption state. No filename, program-name, cross-directory or
+hard-link exceptions are added. Atomic replacement follows the temporary file's
+creation mode; it does not inherit the overwritten destination's encryption.
+Advanced fallocate, copy_file_range and ioctl operations may require caller
+fallback. Git's read-only display adapter remains separate from core encryption.
+VCS programs follow configured authorization: trusted readers see plaintext,
+which may therefore enter repository history.
 
 1.0.8 resource stability:
 Inactive inode descriptors form a bounded, reclaimable LRU cache. Open handles
@@ -104,9 +107,12 @@ descriptor, so cached classification cannot hide an encryption transition.
 1.0.9 editor save stability:
 Open handles retain their original file-pattern matching path across
 backup renames; request process authorization is still checked on every I/O.
-Two-step sibling saves inherit the original backup's state when the destination
-is absent: NAME.tmp with NAME~, or NAME___jb_tmp___ with NAME___jb_old___.
-Ordinary new files follow the configured creation mode, defaulting to plain.
-Signature inspection during rename uses
-nonblocking opens so FIFOs cannot stall the worker. The editor regression uses
-real Java NIO, concurrent safe saves and mapped/open files held across renames.
+All rename and replacement operations retain their source state, including
+editor staging and backup names. New files follow the configured creation mode.
+The editor regression uses real Java NIO, concurrent safe saves and mapped/open
+files held across renames; it also verifies cross-directory hard links and
+RENAME_EXCHANGE between encrypted and plain files.
+
+Configured monitor roots have no system-path blacklist or read/write precheck.
+Directory traversal and file access remain subject to ordinary filesystem
+permissions. Missing, disabled and non-directory entries are not mounted.

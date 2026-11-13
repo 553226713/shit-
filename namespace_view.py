@@ -104,7 +104,7 @@ def run_view(session, executable, policy, uid, gid, groups, home, cwd, command,
             LIBC.prctl(1, signal.SIGTERM, 0, 0, 0)
         fuse = subprocess.Popen(
             [str(executable), str(backing), str(policy_path),
-             str(fd), str(session / 'engine2-metrics.json'), str(uid)],
+             str(fd), str(session / 'engine2-metrics.json')],
             cwd=backing, pass_fds=(fd,), stdout=log, stderr=subprocess.STDOUT,
             env=error_log.engine_environment(scope_environment(policy.get('file_scope')), uid, gid),
             preexec_fn=engine_credentials)

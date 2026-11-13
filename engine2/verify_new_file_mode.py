@@ -27,10 +27,12 @@ def verify(engine):
     for mode in ('plain', 'encrypted'):
         def populate(project, binary):
             config = binary/'sgfs.conf'
-            config.write_text(config.read_text().replace('new_file_mode ==||== plain',
+            rules = '\n'.join(line for line in config.read_text().splitlines()
+                              if line.split('==||==', 1)[0].strip() != '*git*') + '\n'
+            config.write_text(rules.replace('new_file_mode ==||== plain',
                                                          'new_file_mode ==||== ' + mode))
             with config.open('a') as stream:
-                stream.write('*java*==||==*\n')
+                stream.write('*java*==||==*\n*/svn==||==*\n')
             (project/'Existing.java').write_bytes(b'original plain')
             (project/'Cipher.java').write_bytes(old_header)
             if mode == 'encrypted':
@@ -40,6 +42,7 @@ def verify(engine):
             subprocess.run(['cc', '-O2', '-Wall', '-Wextra', '-Werror',
                             str(ROOT/'engine2/file_write_probe.c'), '-o', str(binary/'untrusted-writer')], check=True)
             shutil.copy2(binary/'untrusted-writer', binary/'git')
+            shutil.copy2(binary/'untrusted-writer', binary/'svn')
         with session('engine2', engine, populate) as (_, project, binary, raw_fd, _):
             def disk(name):
                 fd = os.open(name, os.O_RDONLY, dir_fd=raw_fd)
@@ -94,21 +97,19 @@ def verify(engine):
             check(existing, b'existing plain stays plain', encrypted=False)
             stage = project/'save.tmp'; stage.write_bytes(b'atomic plain replacement')
             stage.replace(existing)
-            check(existing, b'atomic plain replacement', encrypted=False)
+            check(existing, b'atomic plain replacement')
             cipher = project/'Cipher.java'; cipher.write_bytes(b'original cipher stays encrypted')
             check(cipher, b'original cipher stays encrypted', encrypted=True)
             assert disk(cipher.name)[:1024] == old_header
             stage = project/'cipher-save.tmp'; stage.write_bytes(b'atomic cipher replacement')
             stage.replace(cipher)
-            check(cipher, b'atomic cipher replacement', encrypted=True)
-            assert disk(cipher.name)[:1024] == old_header
+            check(cipher, b'atomic cipher replacement')
             for temporary, backup_suffix in [('.tmp', '~'), ('___jb_tmp___', '___jb_old___')]:
                 stage = project/(cipher.name + temporary)
                 backup = project/(cipher.name + backup_suffix)
                 stage.write_bytes(b'two-step cipher replacement')
                 cipher.rename(backup); stage.replace(cipher); backup.unlink()
-                check(cipher, b'two-step cipher replacement', encrypted=True)
-                assert disk(cipher.name)[:1024] == old_header
+                check(cipher, b'two-step cipher replacement')
             untrusted = project/'Untrusted.java'
             attempt = subprocess.run([str(binary/'untrusted-writer'), str(untrusted)],
                                      input=b'not trusted', capture_output=True, timeout=5)
@@ -116,10 +117,18 @@ def verify(engine):
                 assert attempt.returncode != 0 and not untrusted.exists()
             else:
                 assert attempt.returncode == 0 and disk(untrusted.name) == b'not trusted', (attempt.returncode, attempt.stderr)
-            raw = project/'Raw.java'
-            subprocess.run([str(binary/'git'), str(raw)], input=b'raw restore',
-                           stdout=subprocess.DEVNULL, check=True, timeout=5)
-            assert disk(raw.name) == b'raw restore'
+            named_git = project/'Git.java'
+            attempt = subprocess.run([str(binary/'git'), str(named_git)], input=b'ordinary git write',
+                                     capture_output=True, timeout=5)
+            if mode == 'encrypted':
+                assert attempt.returncode != 0 and not named_git.exists()
+            else:
+                assert attempt.returncode == 0
+                check(named_git, b'ordinary git write')
+            named_svn = project/'Svn.java'
+            subprocess.run([str(binary/'svn'), str(named_svn)], input=b'authorized svn write',
+                           capture_output=True, check=True, timeout=5)
+            check(named_svn, b'authorized svn write')
             os.mkfifo(project/'pipe')
             assert stat.S_ISFIFO((project/'pipe').stat().st_mode)
             if mode == 'encrypted':
@@ -127,8 +136,8 @@ def verify(engine):
                 for i in range(8):
                     path = project/f'Jvm{i}.java'
                     check(path, (f'// 保存 {i}:7\n'.encode()) * 500)
-                    assert disk(path.name)[:1024] == old_header
-            results[mode] = 'PASS create/read/write/append/truncate/mmap, nested dirs, permissions, original formats, VCS raw view'
+                    assert disk(path.name).startswith(MAGIC)
+            results[mode] = 'PASS create/read/write/append/truncate/mmap, nested dirs, permissions, source-preserving renames, uniform program authorization'
     print(json.dumps(results, ensure_ascii=False, indent=2))
 
 

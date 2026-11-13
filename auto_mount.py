@@ -73,15 +73,6 @@ def user_permissions(uid: int, gid: int, groups: list[int]):
         os.setgroups(previous_groups)
 
 
-def validate_directory(path: Path, access_path: str | Path | None = None) -> None:
-    protected = {'/', '/bin', '/sbin', '/usr', '/etc', '/lib', '/lib64',
-                 '/dev', '/proc', '/sys', '/run', '/var', '/tmp', '/home'}
-    if str(path) in protected:
-        raise ValueError("系统目录不能作为监控根目录")
-    if not os.access(access_path or path, os.R_OK | os.W_OK | os.X_OK, effective_ids=True):
-        raise PermissionError("当前用户缺少目录读、写或进入权限")
-
-
 def top_level_directories(effective: dict, skipped: dict | None = None) -> list[Path]:
     paths = []
     for item in effective["directories"]:
@@ -103,7 +94,6 @@ def top_level_directories(effective: dict, skipped: dict | None = None) -> list[
             if not stat.S_ISDIR(info.st_mode):
                 raise ValueError("不是目录")
             resolved = path.resolve()
-            validate_directory(resolved)
             paths.append(resolved)
         except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as error:
             if skipped is not None:
@@ -147,7 +137,6 @@ def open_mount(
     groups: list[int],
     executable: Path | None = None,
     file_scope: dict | None = None,
-    compat_modules: list[str] | None = None,
     policy_path: Path | None = None,
 ) -> Mount:
     digest = hashlib.sha256(str(origin).encode()).hexdigest()[:16]
@@ -167,10 +156,8 @@ def open_mount(
     mounted_origin = False
     try:
         with user_permissions(uid, gid, groups):
-            validate_directory(origin.resolve())
             origin_fd = os.open(origin, os.O_PATH | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
             pinned_origin = f"/proc/self/fd/{origin_fd}"
-            validate_directory(Path(os.readlink(pinned_origin)), access_path=pinned_origin)
         mount(pinned_origin, str(backing), 4096 | 16384)
         # Keep the backing view outside the original mount's propagation group.
         mount(None, str(backing), 16384 | 262144)
@@ -190,10 +177,10 @@ def open_mount(
         os.chown(log_path, uid, gid)
         executable = executable or runtime_engine()
         command = [str(executable), str(backing), str(policy_path or runtime_policy()),
-                   str(fd), str(session / "engine2-metrics.json"), str(uid)]
+                   str(fd), str(session / "engine2-metrics.json")]
         def credentials():
             # Passthrough registration needs CAP_SYS_ADMIN. Request fsuid/fsgid
-            # and the configured-user check live in the C++ filesystem engine.
+            # and kernel default_permissions enforce filesystem access.
             os.setgroups(groups)
             LIBC.prctl(1, signal.SIGTERM, 0, 0, 0)
         try:
@@ -204,7 +191,7 @@ def open_mount(
                 stdout=log_handle,
                 stderr=subprocess.STDOUT,
                 preexec_fn=credentials,
-                env=error_log.engine_environment(scope_environment(file_scope, compat_modules), uid, gid),
+                env=error_log.engine_environment(scope_environment(file_scope), uid, gid),
             )
         except PermissionError as error:
             raise RuntimeError(f"无法执行加密引擎 {executable}：请检查安装目录的执行权限和挂载选项；{error}") from error

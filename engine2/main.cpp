@@ -27,6 +27,7 @@
 #include <sys/syscall.h>
 #include <sys/uio.h>
 #include <sys/xattr.h>
+#include <system_error>
 #include <thread>
 #include <tuple>
 #include <vector>
@@ -36,14 +37,44 @@
 struct Cred {
     uid_t uid;
     gid_t gid;
+    std::vector<gid_t> groups;
     explicit Cred(fuse_req_t r) {
         auto c = fuse_req_ctx(r);
+        int count = getgroups(0, nullptr);
+        if (count < 0)
+            throw std::system_error(errno, std::generic_category(), "getgroups");
+        groups.resize(count);
+        if (getgroups(count, groups.data()) < 0)
+            throw std::system_error(errno, std::generic_category(), "getgroups");
+        std::vector<gid_t> requested;
+        if (c->pid > 0) {
+            count = fuse_req_getgroups(r, 0, nullptr);
+            if (count < 0)
+                throw std::system_error(-count, std::generic_category(), "request groups");
+            for (;;) {
+                requested.resize(count);
+                int actual = fuse_req_getgroups(r, count, requested.data());
+                if (actual < 0)
+                    throw std::system_error(-actual, std::generic_category(), "request groups");
+                if (actual <= count) {
+                    requested.resize(actual);
+                    break;
+                }
+                count = actual;
+            }
+        }
+        // Credentials belong to this worker thread. libc setgroups would
+        // change every thread and race concurrent requests from other users.
+        if (syscall(SYS_setgroups, requested.size(), requested.data()))
+            throw std::system_error(errno, std::generic_category(), "setgroups");
         gid = setfsgid(c->gid);
         uid = setfsuid(c->uid);
     }
     ~Cred() {
         setfsuid(uid);
         setfsgid(gid);
+        if (syscall(SYS_setgroups, groups.size(), groups.data()))
+            std::terminate();
     }
 };
 struct Storage {
@@ -82,7 +113,7 @@ struct Handle {
     int fd;
     std::shared_ptr<Node> node;
     std::string path;
-    bool passthrough = false, authorized = false, raw = false, append = false, writable = false;
+    bool passthrough = false, authorized = false, append = false, writable = false;
     ~Handle() { close(fd); }
 };
 struct Directory {
@@ -109,7 +140,6 @@ struct Engine {
     fuse_ino_t next = 2;
     bool passthrough = false, mmap = false;
     Counters stats;
-    uid_t owner = 0;
     int fuse_fd = -1;
     explicit Engine(const char *root, const char *config) : policy(config) {
         int fd = open(root, O_PATH | O_DIRECTORY | O_CLOEXEC);
@@ -118,7 +148,6 @@ struct Engine {
         struct stat root_stat{};
         if (fstat(fd, &root_stat))
             throw std::runtime_error("backing stat failed");
-        owner = root_stat.st_uid;
         auto n = std::make_shared<Node>(fd, 1, "");
         n->device = root_stat.st_dev;
         n->physical_ino = root_stat.st_ino;
@@ -375,7 +404,7 @@ struct Engine {
     }
     bool decoded(fuse_req_t req, const std::shared_ptr<Node> &n) {
         auto id = policy.identity(fuse_req_ctx(req)->pid);
-        return !id.raw && policy.trusted(id, path(n));
+        return policy.trusted(id, path(n));
     }
     int attributes(fuse_req_t req, const std::shared_ptr<Node> &n, struct stat &st,
                    int *state = nullptr) {
@@ -496,7 +525,7 @@ static bool authorized(fuse_req_t r, Handle *h) {
         return h->authorized;
     auto &e = engine(r);
     auto id = e.policy.identity(fuse_req_ctx(r)->pid);
-    return !id.raw && e.policy.trusted(id, h->path);
+    return e.policy.trusted(id, h->path);
 }
 static void reply_error(fuse_req_t r, int e) {
     e = e < 0 ? -e : e;
@@ -647,8 +676,7 @@ static void setattr(fuse_req_t r, fuse_ino_t ino, struct stat *st, int mask, fus
             error = errno;
         else {
             int state = e.classify(n, real);
-            auto id = e.policy.identity(fuse_req_ctx(r)->pid);
-            if (state && !decoded && !id.raw)
+            if (state && !decoded)
                 error = EACCES;
             else {
                 int fd = fi ? handle(fi)->fd : e.reopen(n, state ? O_RDWR : O_WRONLY);
@@ -706,9 +734,8 @@ static int open_handle(fuse_req_t r, const std::shared_ptr<Node> &n, fuse_file_i
     h->writable = (fi->flags & O_ACCMODE) != O_RDONLY;
     if (state) {
         auto id = e.policy.identity(fuse_req_ctx(r)->pid);
-        h->raw = id.raw;
-        h->authorized = !id.raw && e.policy.trusted(id, h->path);
-        if ((flags & O_ACCMODE) != O_RDONLY && !h->raw && !h->authorized)
+        h->authorized = e.policy.trusted(id, h->path);
+        if ((flags & O_ACCMODE) != O_RDONLY && !h->authorized)
             return EACCES;
         if (h->authorized && state < 0)
             return -state;
@@ -724,7 +751,7 @@ static int open_handle(fuse_req_t r, const std::shared_ptr<Node> &n, fuse_file_i
         if (error)
             return error;
     }
-    if ((!state || h->raw || !h->authorized) && e.passthrough) {
+    if ((!state || !h->authorized) && e.passthrough) {
         std::lock_guard g(n->storage->cache);
         bool writable = (flags & O_ACCMODE) != O_RDONLY;
         if (!n->storage->backing) {
@@ -820,8 +847,7 @@ static void write_file(fuse_req_t r, fuse_ino_t ino, const char *buf, size_t siz
     }
     int state = e.classify(h->node, st, h->fd);
     bool decode = state && authorized(r, h);
-    bool raw = h->raw && (fuse_req_ctx(r)->pid == 0 || e.policy.identity(fuse_req_ctx(r)->pid).raw);
-    if (state && !decode && !raw) {
+    if (state && !decode) {
         reply_error(r, EACCES);
         return;
     }
@@ -871,9 +897,6 @@ static int creation_format(fuse_req_t r, const std::string &path, bool &encrypt)
     if (!e.policy.encrypt_new)
         return 0;
     auto id = e.policy.identity(fuse_req_ctx(r)->pid);
-    // VCS raw clients must continue restoring their original stored bytes.
-    if (id.raw)
-        return 0;
     if (!e.policy.trusted(id, path))
         return EACCES;
     encrypt = true;
@@ -1067,156 +1090,6 @@ static void link(fuse_req_t r, fuse_ino_t ino, fuse_ino_t parent, const char *na
     else
         lookup(r, parent, name);
 }
-// Implement atomic editor saves at the storage boundary. The original encrypted
-// destination supplies the header; plaintext sources are transformed in a hidden
-// same-directory inode before rename. Existing source bytes remain recoverable.
-static int preserve_rename(Engine &e, fuse_req_t r, const std::shared_ptr<Node> &from,
-                           const char *name, const std::shared_ptr<Node> &to, const char *target,
-                           unsigned flags) {
-    auto native = [&]() {
-        return syscall(SYS_renameat2, from->fd, name, to->fd, target, flags) ? errno : 0;
-    };
-    auto sourcepath = e.path(from) + "/" + name, targetpath = e.path(to) + "/" + target;
-    auto id = e.policy.identity(fuse_req_ctx(r)->pid);
-    if (id.raw)
-        return native();
-    // Moving an editor's original aside must retain its own storage format,
-    // even when an older plaintext backup already occupies the backup name.
-    if (from->ino == to->ino &&
-        (target == std::string(name) + "~" || target == std::string(name) + "___jb_old___"))
-        return native();
-    int dest = openat(to->fd, target, O_RDONLY | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW);
-    bool destination_missing = dest < 0 && errno == ENOENT;
-    if (destination_missing && from->ino == to->ino) {
-        // Two-step safe writes move the original aside before installing the
-        // staged file. Only paired editor names may inherit a backup's state;
-        // arbitrary new files must keep their ordinary plaintext behavior.
-        std::string backup;
-        if (name == std::string(target) + ".tmp")
-            backup = std::string(target) + "~";
-        else if (name == std::string(target) + "___jb_tmp___")
-            backup = std::string(target) + "___jb_old___";
-        if (!backup.empty())
-            dest = openat(to->fd, backup.c_str(), O_RDONLY | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW);
-    }
-    if (dest < 0)
-        return errno == ENOENT || errno == ELOOP ? native() : errno;
-    struct stat ds{};
-    if (fstat(dest, &ds)) {
-        int error = errno;
-        close(dest);
-        return error;
-    }
-    if (!S_ISREG(ds.st_mode)) {
-        close(dest);
-        return native();
-    }
-    std::array<unsigned char, 1024> header{};
-    int de = header_state(dest, header, e.policy);
-    close(dest);
-    int source = openat(from->fd, name, O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC);
-    if (source < 0)
-        return errno == ELOOP && de ? EOPNOTSUPP : native();
-    struct stat ss{};
-    if (fstat(source, &ss)) {
-        int error = errno;
-        close(source);
-        return error;
-    }
-    if (!S_ISREG(ss.st_mode)) {
-        close(source);
-        return de ? EOPNOTSUPP : native();
-    }
-    std::array<unsigned char, 1024> src_header{};
-    // File signatures also identify ciphertext with temporary extensions.
-    int se = header_state(source, src_header, e.policy);
-    if (se < 0 || de < 0) {
-        close(source);
-        return se < 0 ? -se : -de;
-    }
-    bool retain_header = e.policy.encrypt_new && de && from->ino == to->ino && src_header != header;
-    if (se == de && !retain_header) {
-        close(source);
-        return native();
-    }
-    int error = 0;
-    if (!e.policy.trusted(id, targetpath))
-        error = EACCES;
-    else if (flags && !(flags == RENAME_NOREPLACE && destination_missing))
-        error = flags == RENAME_NOREPLACE ? EEXIST : EOPNOTSUPP;
-    else if (from->ino != to->ino || ss.st_nlink != 1)
-        error = EOPNOTSUPP;
-    struct stat parent{};
-    if (!error && fstat(to->fd, &parent))
-        error = errno;
-    auto uid = fuse_req_ctx(r)->uid;
-    if (!error && (parent.st_mode & S_ISVTX) && uid && uid != parent.st_uid &&
-        (uid != ss.st_uid || uid != ds.st_uid))
-        error = EPERM;
-    if (!error && syscall(SYS_faccessat2, to->fd, "", W_OK | X_OK, AT_EMPTY_PATH | AT_EACCESS))
-        error = errno;
-    if (error) {
-        close(source);
-        return error;
-    }
-    // Source and destination views share storage locks, including concurrent
-    // append/mmap writeback; no global cipher lock serializes unrelated files.
-    auto a = e.storage(ss), b = e.storage(ds);
-    std::unique_lock<std::shared_mutex> al(a->data, std::defer_lock), bl(b->data, std::defer_lock);
-    if (a == b)
-        al.lock();
-    else
-        std::lock(al, bl);
-    static std::atomic<unsigned long> serial{};
-    std::string temp = ".ytfs-save-" + std::to_string(getpid()) + "-" + std::to_string(serial++);
-    int out = openat(to->fd, temp.c_str(), O_RDWR | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
-    if (out < 0) {
-        error = errno;
-        close(source);
-        return error;
-    }
-    if (de)
-        error = write_all(out, header.data(), header.size(), 0);
-    std::vector<char> data(65536);
-    off_t pos = 0, total = ss.st_size - (se ? 1024 : 0);
-    while (!error && pos < total) {
-        auto count = pread(source, data.data(), std::min<off_t>(data.size(), total - pos),
-                           pos + (se ? 1024 : 0));
-        if (count <= 0) {
-            error = count < 0 ? errno : EIO;
-            break;
-        }
-        if (se != de) {
-            if (se)
-                e.cipher.apply(data.data(), count, pos + 1024);
-            if (de)
-                e.cipher.apply(data.data(), count, pos + 1024);
-        }
-        error = write_all(out, data.data(), count, pos + (de ? 1024 : 0));
-        pos += count;
-    }
-    if (!error && fchmod(out, ss.st_mode & 0777))
-        error = errno;
-    if (!error && ::fsync(out))
-        error = errno;
-    struct stat after{};
-    if (!error && fstat(source, &after))
-        error = errno;
-    if (!error &&
-        (ss.st_size != after.st_size || ss.st_mtim.tv_sec != after.st_mtim.tv_sec ||
-         ss.st_mtim.tv_nsec != after.st_mtim.tv_nsec || ss.st_ctim.tv_sec != after.st_ctim.tv_sec ||
-         ss.st_ctim.tv_nsec != after.st_ctim.tv_nsec))
-        error = EAGAIN;
-    close(source);
-    close(out);
-    if (!error && syscall(SYS_renameat2, to->fd, temp.c_str(), to->fd, target, flags))
-        error = errno;
-    if (!error && unlinkat(from->fd, name, 0))
-        error = errno;
-    if (error)
-        unlinkat(to->fd, temp.c_str(), 0);
-    return error;
-}
 static void rename(fuse_req_t r, fuse_ino_t parent, const char *name, fuse_ino_t newparent,
                    const char *target, unsigned flags) {
     std::lock_guard namespace_guard(engine(r).namespace_lock);
@@ -1231,7 +1104,7 @@ static void rename(fuse_req_t r, fuse_ino_t parent, const char *name, fuse_ino_t
     struct stat old_source{}, old_target{};
     bool source_known = !fstatat(p->fd, name, &old_source, AT_SYMLINK_NOFOLLOW);
     bool target_known = !fstatat(q->fd, target, &old_target, AT_SYMLINK_NOFOLLOW);
-    int error = preserve_rename(e, r, p, name, q, target, flags);
+    int error = syscall(SYS_renameat2, p->fd, name, q->fd, target, flags) ? errno : 0;
     if (!error) {
         struct stat after{};
         if (!(flags & RENAME_EXCHANGE) && !fstatat(q->fd, target, &after, AT_SYMLINK_NOFOLLOW)) {
@@ -1413,6 +1286,11 @@ struct Guard<void (*)(fuse_req_t, Args...), Function, NoReply> {
                 fuse_reply_err(request, ENOMEM);
                 return;
             }
+        } catch (const std::system_error &error) {
+            if constexpr (!NoReply) {
+                reply_error(request, error.code().value());
+                return;
+            }
         } catch (const std::exception &error) {
             errors::report(EIO, fuse_req_ctx(request)->pid, fuse_req_ctx(request)->uid, error.what());
             if constexpr (!NoReply) {
@@ -1430,31 +1308,15 @@ struct Guard<void (*)(fuse_req_t, Args...), Function, NoReply> {
             fuse_reply_none(request);
     }
 };
-static ssize_t custom_read(int fd, void *buf, size_t size, void *userdata) {
-    auto &e = *static_cast<Engine *>(userdata);
-    for (;;) {
-        auto count = ::read(fd, buf, size);
-        if (count < ssize_t(sizeof(fuse_in_header)))
-            return count;
-        auto *request = static_cast<fuse_in_header *>(buf);
-        if (request->uid == e.owner || request->uid == 0)
-            return count;
-        fuse_out_header denied{};
-        denied.len = sizeof(denied);
-        denied.error = -EACCES;
-        denied.unique = request->unique;
-        if (::write(fd, &denied, sizeof(denied)) != sizeof(denied)) {
-            errno = EIO;
-            return -1;
-        }
-    }
+static ssize_t custom_read(int fd, void *buf, size_t size, void *) {
+    return ::read(fd, buf, size);
 }
 static ssize_t custom_write(int fd, iovec *buf, int count, void *) {
     return writev(fd, buf, count);
 }
 int main(int argc, char **argv) {
-    if (argc != 6) {
-        fprintf(stderr, "usage: engine2 BACKING POLICY FUSE_FD METRICS OWNER_UID\n");
+    if (argc != 5) {
+        fprintf(stderr, "usage: engine2 BACKING POLICY FUSE_FD METRICS\n");
         return 2;
     }
     try {
@@ -1469,7 +1331,6 @@ int main(int argc, char **argv) {
         errors::destination = getenv("YT_ENGINE_ERROR_LOG");
         Engine e(argv[1], argv[2]);
         e.fuse_fd = atoi(argv[3]);
-        e.owner = static_cast<uid_t>(std::stoul(argv[5]));
         fuse_lowlevel_ops ops{};
         ops.init = init;
         ops.lookup = Guard<decltype(ops.lookup), lookup>::call;

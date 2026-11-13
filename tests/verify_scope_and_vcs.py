@@ -1,4 +1,4 @@
-"""Audit complete monitored trees and real SVN/Mercurial round trips in /tmp only.
+"""Audit complete monitored trees and policy-controlled SVN/Mercurial round trips in /tmp only.
 
 --tools points at a temporary dpkg-deb extraction of SVN/Mercurial and their
 dependencies; no system installation or real repository writes are required.
@@ -25,6 +25,7 @@ def verify(args):
     effective = yt_config.effective_config(yt_config.load_settings(), yt_config.load_remote_policy())
     # Reproduce broad policies, including Python-interpreted Mercurial.
     effective['trusted_programs'] = ['*']
+    effective['encryption']['new_file_mode'] = 'plain'
     env = dict(os.environ, LD_LIBRARY_PATH=str(args.tools / 'usr/lib/x86_64-linux-gnu'),
                PYTHONPATH=str(args.tools / 'usr/lib/python3/dist-packages'),
                HGRCPATH=os.devnull, HGUSER='encryption verification <verification@localhost>')
@@ -57,13 +58,9 @@ def verify(args):
         svn_work = project / 'svn-work'
         run(svn, 'checkout', '-q', svn_server.as_uri(), svn_work)
         (svn_work / 'Encrypted.java').write_bytes(raw)
-        run(svn, 'add', 'Encrypted.java', cwd=svn_work)
-        run(svn, 'commit', '-q', '-m', 'initial ciphertext', cwd=svn_work)
         hg_work = project / 'hg-work'; hg_work.mkdir()
         run(hg, 'init', hg_work)
         (hg_work / 'Encrypted.java').write_bytes(raw)
-        run(hg, 'add', 'Encrypted.java', cwd=hg_work)
-        run(hg, 'commit', '-m', 'initial ciphertext', cwd=hg_work)
         process = subprocess.Popen(['sudo', '-n', sys.executable, str(Path(__file__).resolve()),
                                     '--broker', str(work), str(engine)])
         try:
@@ -93,6 +90,10 @@ def verify(args):
             late.parent.mkdir(parents=True); late.write_bytes(raw)
             assert late.read_bytes() == plain
             results['new_directories_symlinks_extensions_and_lookalikes'] = True
+            run(svn, 'add', 'Encrypted.java', cwd=svn_work)
+            run(svn, 'commit', '-q', '-m', 'initial trusted content', cwd=svn_work)
+            run(hg, 'add', 'Encrypted.java', cwd=hg_work)
+            run(hg, 'commit', '-m', 'initial trusted content', cwd=hg_work)
             for name, directory in [('svn', svn_work), ('hg', hg_work)]:
                 p = directory / 'Encrypted.java'
                 assert p.read_bytes() == plain
@@ -108,7 +109,9 @@ def verify(args):
                     received = run(hg, 'cat', '-r', 'tip', 'Encrypted.java', cwd=directory)
                 encrypted = received.startswith(MAGIC) and len(received) == len(expected) + 1024
                 results[name + '_committed_ciphertext'] = encrypted
-                if encrypted:
+                assert received == expected
+                results[name + '_committed_policy_visible_content'] = True
+                if received == expected:
                     (project / (name + '-received.java')).write_bytes(received)
                     assert (project / (name + '-received.java')).read_bytes() == expected
                     p.write_bytes(expected + b'// uncommitted\n')
@@ -142,5 +145,5 @@ if __name__ == '__main__':
         parser.add_argument('--path', required=True)
         parser.add_argument('--config-dir', type=Path, required=True)
         parser.add_argument('--output', type=Path, required=True)
-        parser.add_argument('--require-ciphertext', action='store_true')
+        parser.add_argument('--require-ciphertext', action='store_true', help='Legacy expectation; incompatible with trusted plaintext VCS access')
         verify(parser.parse_args())

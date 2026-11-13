@@ -1,5 +1,4 @@
 #pragma once
-#include "../compat/engine2_view.hpp"
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -22,21 +21,6 @@ inline std::string trim(std::string s) {
         return {};
     return s.substr(a, s.find_last_not_of(" \t\r\n") - a + 1);
 }
-inline std::vector<std::string> split(const char *text) {
-    std::vector<std::string> out;
-    if (!text)
-        return out;
-    std::string s = text;
-    size_t at = 0;
-    while (at < s.size()) {
-        auto end = s.find(',', at);
-        out.push_back(s.substr(at, end == s.npos ? end : end - at));
-        if (end == s.npos)
-            break;
-        at = end + 1;
-    }
-    return out;
-}
 inline std::string basename_of(const std::string &p) {
     auto n = p.rfind('/');
     return n == p.npos ? p : p.substr(n + 1);
@@ -44,7 +28,6 @@ inline std::string basename_of(const std::string &p) {
 struct Identity {
     std::string executable;
     std::string basename;
-    bool raw = false;
 };
 
 class Policy {
@@ -52,8 +35,6 @@ class Policy {
         std::string program, file;
     };
     std::vector<Rule> rules_;
-    std::vector<std::string> raw_ = split(getenv("YT_COMPAT_RAW_CLIENTS"));
-    std::vector<std::string> scripts_ = split(getenv("YT_COMPAT_SCRIPT_CLIENTS"));
 
   public:
     std::string key;
@@ -91,7 +72,6 @@ class Policy {
             return result;
         result.executable.assign(link, n);
         result.basename = basename_of(result.executable);
-        result.raw = ytcompat::raw_process(pid, result.basename, raw_, scripts_);
         return result;
     }
     bool trusted(const Identity &id, const std::string &path) const {
