@@ -121,6 +121,19 @@ class WindowTests(unittest.TestCase):
 
 
 class SyncTests(unittest.TestCase):
+    def test_monitor_signature_ignores_sync_metadata_but_tracks_engine_changes(self):
+        import copy
+        settings = yt_config.normalize_settings({'encryption': {'key': 'test-key'}, 'directories': ['/one']})
+        before = yt_config.effective_config(settings, None)
+        after = copy.deepcopy(before)
+        after['generated_at'] = 'new-sync-time'
+        self.assertEqual(yt_config.monitor_signature(before), yt_config.monitor_signature(after))
+        after['encryption']['new_file_mode'] = 'encrypted'
+        self.assertNotEqual(yt_config.monitor_signature(before), yt_config.monitor_signature(after))
+        after = copy.deepcopy(before)
+        after['directories'][0]['enabled'] = False
+        self.assertNotEqual(yt_config.monitor_signature(before), yt_config.monitor_signature(after))
+
     def test_policy_sync_preserves_directory_edits_during_network_request(self):
         old = yt_config.normalize_settings({'directories': ['/old']})
         latest = yt_config.normalize_settings({'directories': ['/new']})

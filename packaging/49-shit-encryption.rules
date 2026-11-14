@@ -1,0 +1,13 @@
+// A successful first administrator authorization is remembered by the broker.
+// This grant applies only to the installed, root-owned mount helper.
+polkit.addRule(function(action, subject) {
+    if (action.id == "com.yangtu.ytconfig.mount" &&
+        action.lookup("program") == "/usr/lib/shit-encryption/mount-broker") {
+        try {
+            polkit.spawn(["/usr/lib/shit-encryption/mount-authorization", subject.user]);
+            return polkit.Result.YES;
+        } catch (error) {
+            return polkit.Result.NOT_HANDLED;
+        }
+    }
+});

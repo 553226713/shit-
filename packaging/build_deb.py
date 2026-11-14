@@ -20,7 +20,7 @@ OUTPUT = ROOT / 'dist'
 MODULES = ['runtime_paths.py', 'yt_control.py', 'yt_config.py', 'system_tray.py',
            'auto_mount.py', 'auto_service.py', 'namespace_view.py', 'broker_control.py',
            'windows_policy.py', 'file_scope.py', 'error_log.py',
-           'compat_cli.py']
+           'compat_cli.py', 'mount_authorization.py']
 
 
 def write(path, content, mode=0o644):
@@ -76,7 +76,8 @@ def main():
         (native_bin / 'svchost').chmod(0o755)
         shutil.copy2(native.parent / 'dotimer.sh', native_bin / 'dotimer.sh')
         write(native_bin / 'local.ini', '[ytstatus]\nversion=2025.02.06\n')
-        for source, target in [('start-installed.sh', 'start.sh'), ('mount-broker', 'mount-broker')]:
+        for source, target in [('start-installed.sh', 'start.sh'), ('mount-broker', 'mount-broker'),
+                               ('mount-authorization', 'mount-authorization')]:
             shutil.copy2(ROOT / 'packaging' / source, app / target)
             (app / target).chmod(0o755)
         write(staging / 'usr/bin/shit-encryption', '#!/bin/sh\nexec /usr/lib/shit-encryption/start.sh "$@"\n', 0o755)
@@ -102,6 +103,8 @@ StartupWMClass=com.yangtu.ytconfig.control
         policy = staging / 'usr/share/polkit-1/actions/com.yangtu.ytconfig.mount.policy'
         policy.parent.mkdir(parents=True)
         shutil.copy2(ROOT / 'packaging/com.yangtu.ytconfig.mount.policy', policy)
+        write(staging / 'usr/share/polkit-1/rules.d/49-shit-encryption.rules',
+              (ROOT / 'packaging/49-shit-encryption.rules').read_text())
         write(staging / 'usr/lib/tmpfiles.d/shit-encryption.conf', 'd /run/shit-encryption 0755 root root -\n')
         doc = staging / 'usr/share/doc/shit-encryption/安装说明.txt'
         doc.parent.mkdir(parents=True, exist_ok=True)

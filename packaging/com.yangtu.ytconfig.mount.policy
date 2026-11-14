@@ -7,7 +7,7 @@
     <description xml:lang="zh_CN">启动 shit加密目录监控</description>
     <message>Authentication is required to mount encrypted directories.</message>
     <message xml:lang="zh_CN">启动加密目录监控需要管理员授权。</message>
-    <defaults><allow_any>no</allow_any><allow_inactive>auth_admin</allow_inactive><allow_active>auth_admin_keep</allow_active></defaults>
+    <defaults><allow_any>auth_admin</allow_any><allow_inactive>auth_admin</allow_inactive><allow_active>auth_admin_keep</allow_active></defaults>
     <annotate key="org.freedesktop.policykit.exec.path">/usr/lib/shit-encryption/mount-broker</annotate>
   </action>
 </policyconfig>

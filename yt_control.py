@@ -537,12 +537,14 @@ class ClientWindow(Gtk.ApplicationWindow):
         try:
             self.settings = yt_config.normalize_settings(self._collect_fields())
             candidate = yt_config.effective_config(self.settings, self.remote)
+            monitor_changed = yt_config.monitor_signature(candidate) != yt_config.monitor_signature(self.effective)
             yt_config.save_settings(self.settings)
             self.remote = yt_config.load_remote_policy()
             self.effective = candidate
             if candidate["encryption"]["key"]:
                 self.effective = yt_config.write_effective_runtime_config(self.settings, self.remote)
-                self._queue_monitor_refresh()
+                if monitor_changed:
+                    self._queue_monitor_refresh()
             self.dirty = False
             self._refresh_dynamic_fields()
             self._set_trusted_text()
@@ -1053,11 +1055,13 @@ class ClientWindow(Gtk.ApplicationWindow):
         self.status_dot.add_css_class("status-busy")
         self.status_primary.set_text("正在更新策略")
         self.status_detail.set_text(str(self.settings["server"]["policy_source"]["value"]))
+        previous_monitor = yt_config.monitor_signature(self.effective)
 
         def work() -> None:
             try:
                 policy = yt_config.update_policy(self.settings)
-                if auto_service.status().get("active"):
+                effective = yt_config.effective_config(yt_config.load_settings(), policy)
+                if yt_config.monitor_signature(effective) != previous_monitor and auto_service.status().get("active"):
                     auto_service.restart()
                 GLib.idle_add(self._policy_updated, policy, None)
             except Exception as error:
@@ -1099,6 +1103,7 @@ class ClientWindow(Gtk.ApplicationWindow):
 
     def _import_policy_file(self, path: Path) -> None:
         try:
+            previous_monitor = yt_config.monitor_signature(self.effective)
             if path.suffix.lower() == ".dat":
                 policy = yt_config.parse_native_policy(
                     path, server=self.settings["server"]["host"]
@@ -1119,7 +1124,7 @@ class ClientWindow(Gtk.ApplicationWindow):
             self.effective = yt_config.write_effective_runtime_config(
                 self.settings, policy
             )
-            if auto_service.status().get("active"):
+            if yt_config.monitor_signature(self.effective) != previous_monitor and auto_service.status().get("active"):
                 auto_service.restart()
             self._refresh_dynamic_fields()
             self._set_trusted_text()

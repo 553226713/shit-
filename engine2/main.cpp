@@ -802,7 +802,10 @@ static void read_file(fuse_req_t r, fuse_ino_t ino, size_t size, off_t off, fuse
     auto &e = engine(r);
     e.stats.reads++;
     auto h = handle(fi);
-    std::shared_lock lock(h->node->storage->data);
+    // A reply permits RELEASE/FORGET on another worker before this callback
+    // returns. Keep the mutex owner alive until the lock has been destroyed.
+    auto node = h->node;
+    std::shared_lock lock(node->storage->data);
     struct stat st{};
     if (fstat(h->fd, &st)) {
         reply_error(r, errno);
@@ -839,7 +842,8 @@ static void write_file(fuse_req_t r, fuse_ino_t ino, const char *buf, size_t siz
     auto &e = engine(r);
     e.stats.writes++;
     auto h = handle(fi);
-    std::unique_lock lock(h->node->storage->data);
+    auto node = h->node;
+    std::unique_lock lock(node->storage->data);
     struct stat st{};
     if (fstat(h->fd, &st)) {
         reply_error(r, errno);
@@ -1166,7 +1170,7 @@ static void opendir(fuse_req_t r, fuse_ino_t ino, fuse_file_info *fi) {
 static void readdir(fuse_req_t r, fuse_ino_t ino, size_t size, off_t off, fuse_file_info *fi) {
     Cred c(r);
     auto d = reinterpret_cast<Directory *>(fi->fh);
-    std::lock_guard g(d->lock);
+    std::unique_lock g(d->lock);
     seekdir(d->stream, off);
     std::vector<char> data(size);
     size_t used = 0;
@@ -1181,8 +1185,12 @@ static void readdir(fuse_req_t r, fuse_ino_t ino, size_t size, off_t off, fuse_f
             break;
         used += len;
     }
-    if (!used && errno)
-        reply_error(r, errno);
+    int error = !used ? errno : 0;
+    // RELEASEDIR can delete d as soon as the reply reaches the kernel.
+    // Never leave a lock guard referring to its mutex across that reply.
+    g.unlock();
+    if (error)
+        reply_error(r, error);
     else
         fuse_reply_buf(r, data.data(), used);
 }

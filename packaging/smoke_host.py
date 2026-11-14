@@ -64,6 +64,8 @@ import runtime_paths as p
 p.CONFIG_DIR=Path(sys.argv[2])/"config"
 p.STATE_DIR=Path(sys.argv[2])/"state"
 p.MONITOR_DIR=Path(sys.argv[3])
+import mount_authorization
+mount_authorization.DIRECTORY=Path(sys.argv[2])/"authorization-state/authorized-users"
 if '--stop-broker' in sys.argv:
     from broker_control import request_stop
     request_stop(p.MONITOR_DIR)
@@ -134,7 +136,9 @@ else:
                 # The original data-disk bind mount remains after FUSE stops.
                 assert any(line.split()[4]==str(project) for line in Path('/proc/self/mountinfo').read_text().splitlines())
                 print('PASS: original data mount restored after shutdown; real project directories untouched')
-        finally:os.close(raw_fd)
+        finally:
+            os.close(raw_fd)
+            privileged('rm','-rf','--',base/'authorization-state')
 
 
 if __name__=='__main__':verify()

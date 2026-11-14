@@ -571,6 +571,14 @@ def build_sgfs_conf(effective: dict[str, Any]) -> str:
     return "\n".join(lines) + "\n"
 
 
+def monitor_signature(effective: dict[str, Any]) -> tuple:
+    """Compare only configuration consumed by the mount broker and engine."""
+    return (
+        build_sgfs_conf(effective) if effective["encryption"].get("key") else None,
+        tuple(sorted(item["path"] for item in effective["directories"] if item.get("enabled"))),
+    )
+
+
 def write_effective_runtime_config(
     settings: dict[str, Any], remote: dict[str, Any] | None
 ) -> dict[str, Any]:

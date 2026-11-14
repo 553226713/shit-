@@ -299,6 +299,9 @@ def _run_broker() -> int:
     from broker_control import BrokerControl
     control=BrokerControl(STATE,uid,gid)
     if PACKAGED:
+        from mount_authorization import remember
+        remember(uid)
+    if PACKAGED:
         from engine2.artifacts import installed_engine
         installed_engine(ENGINE_DIR)
         yt_config.atomic_write(runtime_policy(), yt_config.build_sgfs_conf(effective), mode=0o640)
