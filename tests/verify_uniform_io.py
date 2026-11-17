@@ -1,6 +1,6 @@
 """Test the same policy/state rules across tools on an isolated temporary mount.
 
-No writes to real repositories, no network push, no software-name exceptions.
+No writes to real repositories or network pushes; real Git transports raw bytes.
 """
 import argparse
 import json
@@ -14,12 +14,14 @@ import tempfile
 import time
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT))
-from verify_git_roundtrip import broker, MAGIC
+sys.path.insert(0, str(ROOT / "src"))
+sys.path.insert(0, str(ROOT / 'tests/engine2'))
+from testing import broker
+from verify_git_roundtrip import MAGIC
 
 
 def verify(args):
-    import yt_config
+    from yt_client import yt_config
     yt_config.SETTINGS_PATH = args.config_dir / 'settings.json'
     yt_config.REMOTE_POLICY_PATH = args.config_dir / 'remote_policy.json'
     effective = yt_config.effective_config(yt_config.load_settings(), yt_config.load_remote_policy())
@@ -29,7 +31,7 @@ def verify(args):
     def run(*command, data=None):
         return subprocess.run([str(x) for x in command], input=data, capture_output=True,
                               check=True, timeout=20).stdout
-    raw = run('git', '-C', args.repo, 'show', 'HEAD:' + args.path)
+    raw = run('git', '-C', args.repo, 'show', args.ref + ':' + args.path)
     assert raw.startswith(MAGIC)
     result = {'version': (ROOT / 'VERSION').read_text().strip(),
               'real_source_modified': False, 'remote_push': False,
@@ -63,7 +65,7 @@ def verify(args):
                 saved = disk('Encrypted.java')
                 assert saved.startswith(MAGIC) and len(saved) == len(expected) + 1024
                 sample = work / 'raw-saved.java'; sample.write_bytes(saved)
-                decoded = run(sys.executable, ROOT / 'compat_cli.py', 'textconv', '--config-dir', args.config_dir, sample)
+                decoded = run(sys.executable, ROOT / 'src/yt_client/cli/compat_cli.py', 'textconv', '--config-dir', args.config_dir, sample)
                 assert decoded == expected, (len(decoded), len(expected), next((i for i, pair in enumerate(zip(decoded, expected)) if pair[0] != pair[1]), None))
             plain = cipher.read_bytes()
             assert plain.startswith(b'package com.xtcloud.')
@@ -90,10 +92,9 @@ def verify(args):
             for name, command in readers:
                 assert run(*command) == plain, name
                 result['trusted_readers'].append(name)
-            # Git must now obey its configured plaintext policy like every
-            # other matched executable; do not write objects or push anything.
-            assert run('git', 'hash-object', cipher) == run('git', 'hash-object', '--stdin', data=plain)
-            result['trusted_readers'].append('git (policy matched, no exception)')
+            # Real Git transports ciphertext even when a trusted wildcard matches.
+            assert run('git', 'hash-object', cipher) == run('git', 'hash-object', '--stdin', data=raw)
+            result['operations'].append('real Git transports raw ciphertext under trusted wildcard')
             assert run('/usr/bin/head', '-c', '32', cipher) == raw[:32]
             # head is not configured; tee, interpreters and shell redirections are.
             writers = [('tee', ['tee', cipher]), ('dd', ['dd', 'of=' + str(cipher), 'status=none']),
@@ -119,13 +120,9 @@ def verify(args):
             result['operations'].append('truncate extension zero-fill')
             stage = cipher.with_name('.save.tmp'); expected = plain + b'\n// atomic save\n'
             stage.write_bytes(expected); stage.replace(cipher)
-            assert disk('Encrypted.java') == expected
-            assert cipher.read_bytes() == expected
-            result['operations'].append('atomic replacement preserves plaintext source')
-            # Restore a ciphertext fixture through the backing descriptor for subsequent encrypted I/O checks.
-            fd = os.open('Encrypted.java', os.O_WRONLY | os.O_TRUNC, dir_fd=raw_fd)
-            with os.fdopen(fd, 'wb') as stream: stream.write(raw)
-            cipher.write_bytes(expected); check(expected)
+            check(expected)
+            assert disk('Encrypted.java')[:1024] == raw[:1024]
+            result['operations'].append('atomic replacement preserves ciphertext target header')
             with cipher.open('r+b') as stream:
                 with mmap.mmap(stream.fileno(), 0) as mapping:
                     assert mapping[:] == expected
@@ -136,7 +133,7 @@ def verify(args):
             assert run('/usr/bin/head', '-c', '32', cipher) == MAGIC
             blocked = binary / 'untrusted-writer'
             subprocess.run(['cc', '-O2', '-Wall', '-Wextra', '-Werror',
-                            str(ROOT/'engine2/file_write_probe.c'), '-o', str(blocked)], check=True)
+                            str(ROOT/'tests/engine2/file_write_probe.c'), '-o', str(blocked)], check=True)
             before = disk('Encrypted.java')
             denied = subprocess.run([str(blocked), str(cipher)], input=b'forbidden', capture_output=True)
             assert denied.returncode != 0 and disk('Encrypted.java') == before
@@ -168,6 +165,7 @@ if __name__ == '__main__':
         parser.add_argument('--engine',type=Path,default=ROOT/'state/engine2/ytfs-engine2')
         parser.add_argument('--repo',type=Path,required=True)
         parser.add_argument('--path',required=True)
+        parser.add_argument('--ref', default='HEAD', help='Historical encrypted sample revision')
         parser.add_argument('--config-dir',type=Path,required=True)
         parser.add_argument('--output',type=Path,default=ROOT/'state/uniform-io-verification.json')
         verify(parser.parse_args())

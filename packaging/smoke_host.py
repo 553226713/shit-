@@ -59,18 +59,18 @@ def verify():
         runner=base/'run.py'
         runner.write_text('''import sys
 from pathlib import Path
-sys.path.insert(0,sys.argv[1])
-import runtime_paths as p
+sys.path.insert(0,str(Path(sys.argv[1])/"src"))
+from yt_client import runtime_paths as p
 p.CONFIG_DIR=Path(sys.argv[2])/"config"
 p.STATE_DIR=Path(sys.argv[2])/"state"
 p.MONITOR_DIR=Path(sys.argv[3])
-import mount_authorization
+from yt_client.monitoring import mount_authorization
 mount_authorization.DIRECTORY=Path(sys.argv[2])/"authorization-state/authorized-users"
 if '--stop-broker' in sys.argv:
-    from broker_control import request_stop
+    from yt_client.monitoring.broker_control import request_stop
     request_stop(p.MONITOR_DIR)
 else:
-    from auto_mount import run_broker
+    from yt_client.monitoring.auto_mount import run_broker
     raise SystemExit(run_broker())
 ''')
         raw_fd=os.open(project,os.O_RDONLY|os.O_DIRECTORY)
@@ -110,7 +110,8 @@ else:
                         with mmap.mmap(stream.fileno(),0) as mapped:
                             assert mapped[:]==expected;mapped[:2]=b'//';mapped.flush()
                     expected=b'//'+expected[2:]
-                    saved=disk();assert saved==expected
+                    saved=disk();assert saved[:1024]==raw[:1024]
+                    assert subprocess.check_output([str(app/'vendor/ytfs-textconv')],input=saved[1024:])==expected
                     print('PASS: root-owned data mount allowed by supplementary-group access; inaccessible directory retains system permissions')
                     print('PASS: packaged FUSE: plain/encrypted read/write, native atomic replacement, mmap, original 301 header for direct writes')
                     if os.environ.get('YT_PACKAGE_TEST_KILL_WORKER')=='1':

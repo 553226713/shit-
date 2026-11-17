@@ -1,0 +1,19 @@
+显示转换模块
+
+经过系统可执行文件身份核验的 Git 使用原始文件字节，不受通配受信规则影响。
+已加密工作文件的暂存、提交、推送与检出保持密文；普通编辑器仍按策略解密读写。
+仅将程序命名为 git 或在脚本参数中放入 git，不会获得此传输视图。
+
+textconv.py 与 src/engine2/textconv.cpp 提供原 301 格式的只读显示转换，不改变输入或索引。
+git.py 通过系统 Git 在 .git/config 和 .git/info 注册本地显示属性，保留已有自定义 diff 规则；显示属性不会被“新建文件加密”再次加密。
+manager.py 在监控目录中后台发现仓库、监听索引变化并刷新显示配置，不阻塞文件读写。
+显示转换仍可用于已有密文对象；普通明文对象直接显示。
+
+手动源码调试：
+  PYTHONPATH=src python3 -m yt_client.cli.compat_cli git-configure /path/repo --config-dir /path/config
+  PYTHONPATH=src python3 -m yt_client.cli.compat_cli textconv --config-dir /path/config /path/history-cipher.java
+
+后台仓库发现范围为监控根目录及两层子目录，更深层仓库可手动配置。
+此显示模块不负责 clean/smudge 或加密文本冲突合并；Git 原始字节传输由文件引擎保证。
+SVN、Mercurial 等仍按普通程序授权规则访问，本次修复不改变它们的传输行为。
+已有明文文件和已泄露的历史不会自动重新加密或改写。

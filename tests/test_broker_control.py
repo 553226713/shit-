@@ -5,8 +5,8 @@ import sys
 import tempfile
 import unittest
 
-sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
-from broker_control import BrokerControl
+sys.path.insert(0,str(Path(__file__).resolve().parents[1] / "src"))
+from yt_client.monitoring.broker_control import BrokerControl
 
 
 class BrokerControlTests(unittest.TestCase):

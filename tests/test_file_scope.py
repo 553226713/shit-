@@ -4,9 +4,9 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from file_scope import normalize_scope, scope_environment
-import yt_config
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+from yt_client.file_scope import normalize_scope, scope_environment
+from yt_client import yt_config
 
 
 class FileScopeTests(unittest.TestCase):

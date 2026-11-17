@@ -18,8 +18,8 @@ import time
 import uuid
 
 ROOT=Path(__file__).resolve().parents[1]
-sys.path.insert(0,str(ROOT))
-from compat.textconv import MAGIC
+sys.path.insert(0,str(ROOT / "src"))
+from yt_client.compat.textconv import MAGIC
 
 
 def digest(data):return hashlib.sha256(data).hexdigest()
@@ -71,7 +71,7 @@ def verify(args):
         if encrypted:
             assert saved[:1024]==originals[name][:1024] and len(saved)==len(observed)+1024
             sample=work/'saved-cipher.bin';sample.write_bytes(saved)
-            decoded=run(sys.executable,ROOT/'compat_cli.py','textconv','--config-dir',ROOT/'config',sample)
+            decoded=run(sys.executable,ROOT/'src/yt_client/cli/compat_cli.py','textconv','--config-dir',ROOT/'config',sample)
             assert decoded==observed
         else:assert saved==observed and not saved.startswith(MAGIC)
         last_raw[name]=digest(saved)

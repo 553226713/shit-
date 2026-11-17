@@ -5,9 +5,9 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-import windows_policy
-import yt_config
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+from yt_client import windows_policy
+from yt_client import yt_config
 
 
 class WindowsPolicyTests(unittest.TestCase):
@@ -48,7 +48,7 @@ class WindowsPolicyTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             applications = Path(directory) / 'applications'; applications.mkdir()
             (applications / 'idea.desktop').write_text('[Desktop Entry]\nType=Application\nExec=/opt/bin/idea %f\n')
-            with patch.dict('os.environ', {'XDG_DATA_HOME': directory, 'XDG_DATA_DIRS': directory}), patch('yt_config.shutil.which', side_effect=lambda name: name if name in ('/opt/bin/idea', 'qmake') else None):
+            with patch.dict('os.environ', {'XDG_DATA_HOME': directory, 'XDG_DATA_DIRS': directory}), patch('yt_client.yt_config.shutil.which', side_effect=lambda name: name if name in ('/opt/bin/idea', 'qmake') else None):
                 matches = yt_config.linux_program_matches(['IntelliJ IDEA', 'qmake.exe', 'solidworks'], [])
             self.assertEqual(set(matches), {'/opt/bin/idea', 'qmake'})
             self.assertNotIn('id', matches)
@@ -56,11 +56,11 @@ class WindowsPolicyTests(unittest.TestCase):
     def test_local_removal_excludes_derived_linux_match(self):
         settings = yt_config.normalize_settings({'programs': [{'name': 'IDEA', 'command': '/opt/idea', 'enabled': True}], 'trusted_programs': []})
         remote = {'trusted_programs': ['IDEA64.EXE']}
-        with patch('yt_config.linux_program_matches', return_value={'/opt/idea': ['IDEA64.EXE']}):
+        with patch('yt_client.yt_config.linux_program_matches', return_value={'/opt/idea': ['IDEA64.EXE']}):
             effective = yt_config.effective_config(settings, remote)
             self.assertIn('/opt/idea', effective['trusted_programs'])
         settings['local_overrides']['removed_server_programs'] = ['IDEA64.EXE']
-        with patch('yt_config.linux_program_matches', wraps=yt_config.linux_program_matches):
+        with patch('yt_client.yt_config.linux_program_matches', wraps=yt_config.linux_program_matches):
             effective = yt_config.effective_config(settings, remote)
             self.assertNotIn('/opt/idea', effective['trusted_programs'])
 

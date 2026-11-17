@@ -1,0 +1,127 @@
+Engine 2 — local C++ FUSE engine (application version 1.0.13)
+
+Source and installed builds use only this engine; the old engine, callback patcher and executable backups were deleted.
+The original vendor filesystem executable was replaced by a hash-verified 3861
+byte arithmetic capsule (vendor/cipher301.bin), preserving only format 301 math.
+
+Build:
+  python3 linux-client/src/engine2/build.py
+  python3 linux-client/src/engine2/build.py --textconv
+Requires x86_64, a C++20 compiler, libfuse >=3.18 headers and runtime. The builder
+uses state/toolchain/fuse3 if system headers are not installed. Packaged runtimes verify precompiled components and execute them directly from
+the installation vendor directory. Runtime compilation/copying is not used.
+The mutable monitor directory holds only policy, logs, status and backing mounts;
+it can reside on a noexec filesystem. Policy paths are explicit launcher inputs,
+independent of executable paths. The source build uses state/engine2 for artifacts.
+
+Run manually with the source monitor stopped:
+  python3 linux-client/src/yt_client/monitoring/auto_mount.py
+Or restart the existing source service:
+  systemctl --user restart ytsysconfig-auto.service
+No engine selector or legacy fallback remains. Git display uses the separate
+streaming adapter; it contains no filesystem/mount code.
+
+Design:
+Plain files use kernel passthrough for data I/O whenever possible.
+Every file beneath a configured monitor root participates in signature checks;
+there are no directory-name, filename or extension exclusions. Saved legacy
+file_scope restrictions and YT_SCOPE_* variables do not exclude files.
+Only a file with a matching signature enters the encrypted path.
+Signature classification is cached by inode size/mtime/ctime, never plaintext.
+Raw and decoded views use different FUSE inode IDs, preventing mmap cache mixing.
+Program-name patterns match basenames; only explicit path patterns match paths.
+This prevents a cargo directory from implicitly authorizing unrelated utilities.
+A file's original 301 header is preserved. Existing plain files stay plain.
+New regular files default to plain; the local encryption.new_file_mode setting
+can select encrypted. This creates a format-301 header before publishing the
+file and encrypts its I/O. Untrusted ordinary creators are denied in encrypted
+mode. System Git is inode-verified against protected root-owned executables and
+uses raw-byte transport, even under a wildcard trusted rule. Its own metadata and
+checkout writes bypass new-file encryption; executable names alone grant nothing.
+Trusted plaintext replacement over an existing encrypted regular file stages an
+encrypted copy with the original target header before replacing the name. Source
+hardlinks and already-open handles keep their original inode. Already-encrypted
+sources, moves to absent destinations, and RENAME_EXCHANGE retain source format.
+Cipher tables initialize once; mutable stream contexts are thread-local.
+Independent files run concurrently. An inode's writes/append/truncation serialize.
+Lookup and open references govern descriptor/node lifetime. There is no added
+address-space/memory limit or Git mapping-window limit. Open-file soft limits
+are raised to the existing hard limit for large repositories.
+Root privilege is retained for kernel passthrough registration; request fsuid/
+fsgid, per-request supplementary groups and kernel default_permissions enforce
+backing access for all users,
+including container users. Privileged signature inspection does not
+provide file contents to clients lacking read permission.
+
+Verification (disposable mounts; source repositories remain untouched):
+  python3 linux-client/tests/engine2/verify.py
+  python3 linux-client/tests/engine2/verify_permissions.py
+  python3 linux-client/tests/engine2/verify_editor_saves.py  # also requires a JDK
+  python3 linux-client/tests/engine2/verify_new_file_mode.py  # format/header and I/O boundaries
+  python3 linux-client/tests/verify_git_roundtrip.py  # synthetic fixture + local bare remote
+  python3 linux-client/tests/engine2/benchmark.py --repeat 3
+The old engine comparison uses the recorded pre-removal baseline report; it
+does not retain or execute the removed engine.
+  python3 linux-client/tests/verify_uniform_io.py ...
+  python3 linux-client/tests/verify_git_roundtrip.py ...
+  python3 linux-client/tests/verify_scope_and_vcs.py ...
+Read reports in state/engine2/. Git tests use a disposable local bare remote by
+default. server-roundtrip.json records the explicit real-server push/fetch test. Original Windows
+DLL emulation verifies random offsets against newly written ciphertext.
+verify.py requires the separate sibling linux-client-archive/probe_cipher.py
+and its Windows DLL emulation dependencies for this comparison.
+
+Limits:
+Zed UI responsiveness is tested by the user; parallel scanning is a surrogate,
+not a claim that a real Zed multi-project run has passed. Metadata still passes
+through FUSE. Per-inode state and descriptors grow with the kernel inode cache.
+Rename delegates to renameat2 and preserves the source inode, bytes, links,
+xattrs and encryption state. No filename, program-name, cross-directory or
+hard-link exceptions are added. Atomic replacement follows the temporary file's
+creation mode; it does not inherit the overwritten destination's encryption.
+Advanced fallocate, copy_file_range and ioctl operations may require caller
+fallback. Git's read-only display adapter remains separate from core encryption.
+VCS programs follow configured authorization: trusted readers see plaintext,
+which may therefore enter repository history.
+
+1.0.8 resource stability:
+Inactive inode descriptors form a bounded, reclaimable LRU cache. Open handles
+and in-flight requests retain pinned descriptors; evicted paths are reopened
+beneath the backing root without symlink traversal and checked by device/inode.
+This does not limit repository size, Git pack mapping size or address space.
+Metadata fingerprints store only size and timestamps. C++ callback exceptions
+return I/O/resource errors instead of terminating the whole FUSE process.
+Broker shutdown uses a per-user authenticated control socket and single-instance
+lock, allowing normal user-service stops to clean up root-owned mount workers.
+Worker exit status/signal and log paths are recorded. This does not establish the
+cause of any remote crash without its logs. The monitor retries failed mounts
+and exited workers with a 1–60 second exponential backoff, reset after 60 seconds
+of stable operation. A requested monitor stop cancels pending retries. Recovery
+retains the last worker exit details in status.json with a recovered_at timestamp.
+Applications must reopen descriptors belonging to a disconnected old mount.
+
+The broker releases its duplicate /dev/fuse descriptor after worker startup,
+so a dead worker aborts outstanding requests rather than leaving them hung.
+
+Metadata scanning optimization (version remains 1.0.8):
+Regular files keep zero-timeout lookup validation for per-process views and
+atomic saves that replace an editor temporary file's backing inode.
+Unchanged plaintext metadata reuses its inode state after backing fstatat and
+size/mtime/ctime checks, avoiding descriptor reopen/eviction cycles. Metadata
+lookup returns its existing stat rather than repeating fstat/classification.
+  python3 linux-client/tests/engine2/benchmark_metadata.py --before OLD_ENGINE
+verify.py also checks plaintext changed to ciphertext through a raw backing
+descriptor, so cached classification cannot hide an encryption transition.
+
+1.0.9 editor save stability:
+Open handles retain their original file-pattern matching path across
+backup renames; request process authorization is still checked on every I/O.
+All rename and replacement operations retain their source state, including
+editor staging and backup names. New files follow the configured creation mode.
+The editor regression uses real Java NIO, concurrent safe saves and mapped/open
+files held across renames; it also verifies cross-directory hard links and
+RENAME_EXCHANGE between encrypted and plain files.
+
+Configured monitor roots have no system-path blacklist or read/write precheck.
+Directory traversal and file access remain subject to ordinary filesystem
+permissions. Missing, disabled and non-directory entries are not mounted.

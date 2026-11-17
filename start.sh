@@ -2,6 +2,7 @@
 set -eu
 
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+export PYTHONPATH="$script_dir/src"
 fail() {
     printf '%s\n' "$1" >&2
     if command -v zenity >/dev/null 2>&1; then
@@ -61,7 +62,7 @@ fi
 
 if [ "${1:-}" = "--foreground" ]; then
     shift
-    exec "$python" "$script_dir/yt_control.py" "$@"
+    exec "$python" -m yt_client "$@"
 fi
 
 log_dir="$script_dir/state"
@@ -70,10 +71,10 @@ mkdir -p "$log_dir"
 chmod 700 "$log_dir"
 
 if command -v setsid >/dev/null 2>&1; then
-    nohup setsid -f "$python" "$script_dir/yt_control.py" \
+    nohup setsid -f "$python" -m yt_client \
         >>"$log_file" 2>&1 </dev/null
 else
-    nohup "$python" "$script_dir/yt_control.py" \
+    nohup "$python" -m yt_client \
         >>"$log_file" 2>&1 </dev/null &
 fi
 

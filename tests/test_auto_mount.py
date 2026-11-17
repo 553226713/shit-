@@ -4,8 +4,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-import auto_mount
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+from yt_client.monitoring import auto_mount
 
 
 class AutoMountTests(unittest.TestCase):
@@ -69,7 +69,7 @@ class AutoMountTests(unittest.TestCase):
                 self.assertFalse(any(p['state'] == 'failed' for p in payloads))
 
     def test_compatibility_failure_does_not_exit_mount_broker(self):
-        import compat.manager
+        import yt_client.compat.manager as manager
         from contextlib import ExitStack
         with tempfile.TemporaryDirectory() as temporary, ExitStack() as stack:
             directory=Path(temporary);handlers={}
@@ -79,14 +79,14 @@ class AutoMountTests(unittest.TestCase):
                          patch.object(auto_mount.yt_config,'effective_config',return_value={'directories':[]}),patch.object(auto_mount,'top_level_directories',return_value=[]),
                          patch.dict(auto_mount.os.environ,{'SUDO_UID':'1000','SUDO_GID':'1000'}),patch.object(auto_mount.os,'chown'),
                          patch.object(auto_mount.os,'getgrouplist',return_value=[1000]),patch.object(auto_mount.signal,'signal',side_effect=lambda sig,cb:handlers.update({sig:cb})),
-                         patch.object(auto_mount.time,'sleep',side_effect=sleep),patch.object(compat.manager.GitPatches,'tick',side_effect=OSError('watcher failure'))]:stack.enter_context(item)
+                         patch.object(auto_mount.time,'sleep',side_effect=sleep),patch.object(manager.GitPatches,'tick',side_effect=OSError('watcher failure'))]:stack.enter_context(item)
             status=stack.enter_context(patch.object(auto_mount,'write_status'))
             self.assertEqual(auto_mount.run_broker(),0)
             self.assertTrue(any('compatibility' in call.args[0] for call in status.call_args_list))
 
     def run_recovery_scenario(self, outcomes, stop_at):
         from contextlib import ExitStack
-        import compat.manager
+        import yt_client.compat.manager as manager
         with tempfile.TemporaryDirectory() as temporary, ExitStack() as stack:
             state = Path(temporary)
             directory = state / 'project'; directory.mkdir()
@@ -123,7 +123,7 @@ class AutoMountTests(unittest.TestCase):
                 patch.object(auto_mount.time, 'sleep', side_effect=sleep),
                 patch.object(auto_mount, 'open_mount', side_effect=open_mount),
                 patch.object(auto_mount, 'close_mount', side_effect=lambda item: closed.append(item)),
-                patch.object(compat.manager, 'GitPatches'),
+                patch.object(manager, 'GitPatches'),
             ]
             for item in patches: stack.enter_context(item)
             status = stack.enter_context(patch.object(auto_mount, 'write_status'))

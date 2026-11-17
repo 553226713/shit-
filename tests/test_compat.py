@@ -5,12 +5,12 @@ import tempfile
 import time
 import unittest
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from file_scope import scope_environment
-from compat.manager import GitPatches
-from compat.git import git
-from compat.textconv import MAGIC
-from compat.index_watch import IndexWatch
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+from yt_client.file_scope import scope_environment
+from yt_client.compat.manager import GitPatches
+from yt_client.compat.git import git
+from yt_client.compat.textconv import MAGIC
+from yt_client.compat.index_watch import IndexWatch
 from unittest.mock import patch
 
 
@@ -49,7 +49,7 @@ class CompatibilityTests(unittest.TestCase):
                     refresh()
                     self.assertEqual((repo/'.git/index').read_bytes(),before)
                     self.assertIn(b'diff: shit-encryption',git(repo,'check-attr','diff','--','New.java'))
-                    with patch('compat.manager.index_signature', side_effect=AssertionError('idle metadata polling')):
+                    with patch('yt_client.compat.manager.index_signature', side_effect=AssertionError('idle metadata polling')):
                         for _ in range(50): patcher.tick([repo])
                 finally: patcher.close()
 

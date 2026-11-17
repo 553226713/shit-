@@ -7,9 +7,9 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from compat.textconv import convert, MAGIC
-from compat.git import enable, git, quote_pattern, BEGIN, END
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+from yt_client.compat.textconv import convert, MAGIC
+from yt_client.compat.git import enable, git, quote_pattern, BEGIN, END
 
 
 class GitDisplayTests(unittest.TestCase):
@@ -18,7 +18,7 @@ class GitDisplayTests(unittest.TestCase):
             path = Path(tmp) / 'plain.java'; data = b'package test;\r\n// plain\n' * 5000
             path.write_bytes(data)
             output = io.BytesIO()
-            with patch('yt_config.load_settings', side_effect=AssertionError('No policy needed')):
+            with patch('yt_client.yt_config.load_settings', side_effect=AssertionError('No policy needed')):
                 convert(path, output)
             self.assertEqual(output.getvalue(), data)
             self.assertEqual(path.read_bytes(), data)
@@ -32,7 +32,7 @@ class GitDisplayTests(unittest.TestCase):
                     data[85:89] = (301).to_bytes(4, 'little'); data[-5:] = b'[END]'
                 path.write_bytes(data)
                 output = io.BytesIO()
-                with patch('yt_config.load_settings', return_value={}), patch('yt_config.load_remote_policy', return_value=None), patch('yt_config.effective_config', return_value={'encryption': {'key': 'wrong-policy'}}), self.assertRaises(ValueError):
+                with patch('yt_client.yt_config.load_settings', return_value={}), patch('yt_client.yt_config.load_remote_policy', return_value=None), patch('yt_client.yt_config.effective_config', return_value={'encryption': {'key': 'wrong-policy'}}), self.assertRaises(ValueError):
                     convert(path, output)
                 self.assertEqual(output.getvalue(), b'')
                 self.assertEqual(path.read_bytes(), data)
@@ -45,7 +45,7 @@ class GitDisplayTests(unittest.TestCase):
                 (repo / name).write_bytes(MAGIC + b'x' * 1100 if name != 'plain.java' else b'class Plain {}')
             git(repo, 'add', '.')
             info = repo / '.git/info/attributes'
-            info.write_text('custom.java diff=existing\n')
+            info.write_text('custom.java diff=existing')
             index = (repo / '.git/index').read_bytes()
             first = enable(repo, '/example/textconv')
             self.assertEqual(first['encrypted_text_files'], 1)
@@ -59,7 +59,7 @@ class GitDisplayTests(unittest.TestCase):
             self.assertIn(b'diff: unspecified', git(repo, 'check-attr', 'diff', '--', 'plain.java'))
             self.assertEqual(git(repo, 'config', '--local', '--get', 'diff.shit-encryption.cachetextconv'), b'false\n')
             saved = json.loads(info.with_name('shit-encryption-display-backup.json').read_text())
-            self.assertEqual(saved['attributes'], 'custom.java diff=existing\n')
+            self.assertEqual(saved['attributes'], 'custom.java diff=existing')
 
     def test_managed_entry_updates_without_reconfiguring_with_legacy_scope(self):
         with tempfile.TemporaryDirectory() as tmp:

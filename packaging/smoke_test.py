@@ -4,9 +4,9 @@ from pathlib import Path
 import sys
 from unittest.mock import patch
 
-sys.path.insert(0, '/usr/lib/shit-encryption')
-import yt_config
-from windows_policy import prepare_bridge
+sys.path.insert(0, '/usr/lib/shit-encryption/src')
+from yt_client import yt_config
+from yt_client.windows_policy import prepare_bridge
 from engine2.artifacts import installed_engine, installed_textconv
 
 assert yt_config.PACKAGED
@@ -24,14 +24,12 @@ with patch('subprocess.run', side_effect=AssertionError('Runtime compilation is 
     assert installed_engine(yt_config.ROOT/'vendor') == yt_config.ROOT/'vendor/ytfs-engine2'
     assert installed_textconv(yt_config.ROOT/'vendor') == yt_config.ROOT/'vendor/ytfs-textconv'
 
-from yt_control import ClientWindow, Gtk, Gio
+from yt_client.ui.yt_control import ClientWindow, Gtk, Gio
 app = Gtk.Application(application_id='com.yangtu.package.test', flags=Gio.ApplicationFlags.NON_UNIQUE)
 app.register(None)
 window = ClientWindow(app)
-window.server_host.set_text('127.0.0.1')
-with patch.object(window, '_queue_monitor_refresh') as restart:
-    assert window._save(quiet=True), 'First-run server configuration must save without an encryption key'
-    restart.assert_not_called()
+window.server_page.server_host.set_text('127.0.0.1')
+assert window._apply_server_settings(), 'First-run server configuration must save without an encryption key'
 assert yt_config.load_settings()['server']['host'] == '127.0.0.1'
 window.destroy()
 print('PASS: clean user configuration, native client preparation, precompiled components, first-run GTK window and save')

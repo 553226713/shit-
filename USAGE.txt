@@ -7,16 +7,18 @@ Linux 原生加解密隔离启动器
   安装失败会停止启动，详情见 state/dependency-install.log；依赖齐全时不会访问软件源。
   /dev/fuse 和现有 sudo 授权仍需系统提供，安装软件包不会修改权限策略。
   start.sh 默认后台启动并立即返回，不占用终端；调试时使用 start.sh --foreground。
-  窗口关闭和最小化按钮会隐藏配置窗口，后台监控继续运行；托盘双击或菜单可重新打开。
+  关闭按钮隐藏配置窗口到托盘，最小化使用桌面默认行为；后台监控继续运行，托盘双击或菜单可重新打开。
   安装包会安装 com.yangtu.ytconfig.control.desktop 桌面入口；源码开发直接运行 start.sh。
 
-配置中心提供三个页面：
-  概览：查看自动监控、引擎和策略状态，控制监控启停，并选择监控目录。
-  服务器与策略：配置服务器地址、自动更新周期，执行网络检测和手动更新。
-  应用与程序名：查看 Windows 配置应用、Linux 匹配结果并维护受信程序规则。
+配置中心提供四个页面：
+  概览：查看实际监控状态，控制启停，切换新建文件格式，并预览目录状态。
+  监控目录：搜索目录，查看来源、实际挂载或异常原因，添加、启停、移除和重试。
+  程序权限：按来源筛选规则，本地追加、删除或停用/恢复服务器项；高级编辑和 Windows/Linux 匹配详情默认折叠。
+  服务器与策略：分开呈现连接配置、连通性检测、策略同步和当前合并策略；密钥只显示是否配置及来源。
 
-窗口底部状态栏显示文件服务状态、有效策略来源、匹配程序数和最近错误。Ubuntu
-GNOME 顶部状态栏会显示盾牌托盘图标；左键重新打开窗口，右键菜单可打开或退出。
+监控状态在概览主卡显示，底部显示最近操作反馈；配置已保存不代表监控已启动或新格式已生效。
+程序权限和服务器配置分别点击本页“应用”，不会保存其他页面的草稿。关闭窗口隐藏到托盘并保留草稿。
+Ubuntu GNOME 顶部状态栏会显示盾牌托盘图标；左键重新打开窗口，右键菜单可打开或退出。
 应用图标位于 assets/hicolor/scalable/apps/，桌面入口使用同一图标。
 托盘依赖 Ubuntu 自带的 ubuntu-appindicators 扩展，未启用时界面仍可使用。
 后台运行日志位于 state/launcher-ui.log。
@@ -24,7 +26,7 @@ GNOME 顶部状态栏会显示盾牌托盘图标；左键重新打开窗口，�
 自动监控模式（推荐）：
   启动配置中心后自动安装并启用 systemd 用户服务 ytsysconfig-auto.service，
   把支持目录常驻挂载在原路径；概览页可停止或重新启用。
-  在自动监控模式下面选择目录；增删、启停后自动保存并在后台更新监控，无需点保存。
+  在“监控目录”页面选择文件夹；增删、启停后自动保存并在后台更新正在运行的监控。
   删除全部目录后服务等待选择目录，重新添加即可恢复；手动停止监控时不会因目录编辑自行启动。
   界面不再提供独立会话启动区或本地应用启动列表。
   登录后自动启动，Zed、IDEA、cat、文件管理器等无需包装器即可透明访问。
@@ -37,11 +39,11 @@ GNOME 顶部状态栏会显示盾牌托盘图标；左键重新打开窗口，�
     systemctl --user stop ytsysconfig-auto.service
     systemctl --user status ytsysconfig-auto.service
   自动模式使用保留文件状态的适配组件：已有密文仍解密读写并保持密文，
-  已有明文保持明文。新建文件默认明文，可在概览的“新建文件保存格式”选择加密并应用。
+  已有明文保持明文。概览中的“新建文件格式”切换即保存；等待服务实际确认后才显示“已生效”。
   设置只影响后续新建文件，服务器同步不会覆盖它；停止服务只卸载视图，不会改写文件状态。
   编辑器将原文件改名备份后，已打开句柄保持原读写视图，避免中途读出密文或破坏文件头。
-  重命名和替换按系统语义保留源文件状态，不再根据编辑器临时文件或备份文件名改变格式。
-  临时文件按新建格式设置创建，默认明文；替换密文目标时也不会自动继承目标格式。
+  普通移动保留源文件状态。受信程序用明文临时文件覆盖已有密文目标时，先生成密文副本，
+  保留原目标文件头后再替换；已是密文的源文件、目标不存在的移动及交换仍保留源格式。
 
 监控文件范围（1.0.9）：
   配置监控目录后，其内部所有子目录和文件均参与文件签名检查，
@@ -93,10 +95,10 @@ GNOME 顶部状态栏会显示盾牌托盘图标；左键重新打开窗口，�
   及失效规则。证据见 ../analysis/vfsd_driver.disasm.txt 和对应 .pe.txt。
 
   性能回归工具（临时目录挂载，不改动真实项目）：
-    python3 tests/verify_performance.py 旧版引擎 新版引擎 原始密文样本
-  使用当前密钥和 100 条不匹配程序规则，测试 4000 个混合大小明文文件的
-  属性查询、读取，以及密文读写、原子替换、追加、清空、非受信程序保护。
-  原始密文样本必须是磁盘密文副本，不能从正在解密的项目视图直接复制。
+    python3 tests/engine2/benchmark.py --repeat 3
+    python3 tests/engine2/benchmark_metadata.py --before /path/to/old-engine
+  工作负载和参数见各工具的 --help；密文样本必须是磁盘密文副本，
+  不能从正在解密的项目视图直接复制。
 
 配置与策略：
   config/settings.json：本地配置，权限 600，保存目录、应用、程序名和覆盖记录。
@@ -114,40 +116,46 @@ GNOME 顶部状态栏会显示盾牌托盘图标；左键重新打开窗口，�
     比较时取程序基本名、去扩展名并转小写，用 Linux 名称查询 Windows 名称是否包含它。
     匹配候选来自本机桌面应用、现有应用配置和服务器明确列出的可执行程序名。
     Windows 原始显示名和进程名保留供核对，不执行 Windows 程序。
-    “服务器与策略”展示同步原始内容及本地删除标记，“应用与程序名”也单独展示服务器名称。
+    “服务器与策略”可展开查看不含密钥的同步内容；“程序权限”可展开 Windows 应用与 Linux 匹配详情。
   HTTP/HTTPS JSON：返回约定字段的 JSON 策略。
   本地 JSON / 原生策略：选择 JSON，或选择 LinuxJMData.dat 并自动读取同目录 sgfs.conf。
   本机策略命令：命令把 JSON 写到 stdout，适合后续接入原厂登录/取策略协议。
   JSON 字段示例见 config/policy.example.json。
 
 无 UI 时可以直接使用：
-  python3 policy_manager.py status
-  python3 policy_manager.py update
-  python3 policy_manager.py import /path/LinuxJMData.dat
-  python3 policy_manager.py check
+  PYTHONPATH=src python3 -m yt_client.cli.policy_manager status
+  PYTHONPATH=src python3 -m yt_client.cli.policy_manager update
+  PYTHONPATH=src python3 -m yt_client.cli.policy_manager import /path/LinuxJMData.dat
+  PYTHONPATH=src python3 -m yt_client.cli.policy_manager check
 
 运行方式（在普通用户终端执行）：
   zed /完整路径/加密文件.java
   自动监控运行时，普通 zed 命令和桌面 Zed 图标直接使用原路径透明访问。
   自动监控停止后，Zed 会看到原始密文；如需单进程隔离，可使用下面的命令行入口。
-  python3 yt_run.py cat /完整路径/Example.java
-  python3 yt_run.py bash
-  python3 yt_run.py zed /完整路径/项目
+  PYTHONPATH=src python3 -m yt_client.cli.yt_run cat /完整路径/Example.java
+  PYTHONPATH=src python3 -m yt_client.cli.yt_run bash
+  PYTHONPATH=src python3 -m yt_client.cli.yt_run zed /完整路径/项目
 
 目录组织（当前目录可整体搬移，运行代码不依赖外层 analysis）：
   压缩源码：sh packaging/archive-source.sh
   默认生成 ../linux-client-source.tar.gz，也可将输出路径作为第一个参数传入。
   从 Git HEAD 导出已提交源码，不包含未提交修改、本机配置、策略密钥、运行数据或构建产物。
   此操作需要 Git 仓库；目标机器需重新构建并满足下述依赖。
-  yt_run.py、namespace_view.py：程序启动与隔离文件视图。
-  engine2/build.py、engine2/main.cpp：原生并发文件引擎构建代码。
+  src/yt_client/ui/：GTK 配置界面与托盘。
+  src/yt_client/monitoring/：挂载、授权、用户服务与隔离文件视图。
+  src/yt_client/cli/：策略管理、命令行隔离启动与 Git 显示入口。
+  src/yt_client/compat/：Git 只读显示转换。
+  src/engine2/：原生并发文件引擎、流式转换器及构建代码。
+  src/native/：原生策略查询桥接代码。
+  tests/engine2/：引擎验证、性能工具和测试探针。
+  packaging/：安装包构建、桌面入口模板和授权规则。
   config/：监控目录及当前服务器下发的加密标识、进程规则。
   vendor/：301 算法组件及其 SHA256 清单，原生文件服务已移除。
   state/：运行生成的程序、会话记录、日志、Zed 数据与最新验证结果。
-  原生服务器策略优先查找 vendor/native-client 或已安装的 /opt/apps 客户端；
-  当前开发机也可从外层归档的原生客户端运行目录读取。
+  原生服务器策略优先查找 YT_NATIVE_CLIENT_ROOT、vendor/native-client 或已安装的 /opt/apps 客户端；
+  也支持另行提供的外层开发归档中的原生客户端运行目录。
 
-旁边的 ../linux-client-archive/ 单独保留开发归档：
+可选的 ../linux-client-archive/ 开发归档不随本仓库提供，历史内容包括：
   verify_global_view.py：本机真实加密源码集成验证。
   inspect_encrypted.py、decrypt_java301.py、probe_cipher.py：文件检查、
     单文件解密和 Windows 原始算法对照工具。
@@ -155,7 +163,7 @@ GNOME 顶部状态栏会显示盾牌托盘图标；左键重新打开窗口，�
   research/：原安装包、策略获取工具、早期挂载实验、反汇编和历史验证材料。
   runtime-sessions/：之前的运行会话记录。
 
-后续服务或安装包以启动/构建代码、config/、vendor/ 为主体；state/ 是运行
+后续服务或安装包以 src/、packaging/、assets/、config/、vendor/ 为主体；state/ 是运行
 数据。正式分发时应把原生客户端运行目录放入 vendor/native-client；启用监控会安装当前用户的 systemd 服务和桌面自启动项。
 构建需要 Python 3、gcc、g++、binutils；运行需要 sudo、unshare 和 /dev/fuse。
 config/ 中含本机当前策略，state/ 和外层归档中有日志和样本，均按私有目录保留。
@@ -168,7 +176,7 @@ config/ 中含本机当前策略，state/ 和外层归档中有日志和样本�
 避免把打开请求转交给视图外的旧进程。上述隔离规则仅适用于命令行会话。
 启动依赖当前机器已配置的 sudo 权限、私有挂载命名空间和 /dev/fuse。
 本地适配版 sgfs 以普通用户身份运行，应用也不会获得 root 身份。
-旧的单线程文件引擎及回调补丁构建器已移除。engine2/build.py 构建原生并发文件引擎，
+旧的单线程文件引擎及回调补丁构建器已移除。src/engine2/build.py 构建原生并发文件引擎，
 仅复用 vendor/cipher301.bin 中经过校验的 301 算法，不再执行原厂文件服务。
 
 监控目录内文件的读写规则按文件头及服务器策略标识判断，不按扩展名自动加密：
@@ -176,29 +184,29 @@ config/ 中含本机当前策略，state/ 和外层归档中有日志和样本�
   已有明文：读取和写入都保持明文。
   新建文件：可配置明文或加密，默认明文，不继承项目中其他文件的状态。
   选择加密后，由受信程序创建 301 密文；未获授权的普通程序创建会被拒绝。
-  Git/SVN/Hg 按普通程序执行配置中的授权规则，不再按名称获得原始密文写入豁免。
-  受信版本控制程序读取明文，提交的历史也可能包含明文。
-  临时文件替换保存：保留源文件自身的加密状态、硬链接和元数据。
+  经可执行文件身份核验的系统 Git 使用原始文件字节，密文暂存、提交、推送与检出均保持密文。
+  仅靠 Git 文件名或脚本参数不能获得传输视图；SVN/Hg 仍按普通程序授权访问。
+  明文临时文件覆盖已有密文目标：保持目标加密，保留源文件的其他硬链接和已打开句柄。
   普通移动到不存在的新路径：保留源文件原有状态。
   不支持的加密格式或策略不匹配：拒绝写入，保留原数据。
 
-当前版本（1.0.10）：
+当前版本（1.0.13）：
   直接启动：./start.sh（前台日志：./start.sh --foreground）。
   源码界面使用独立 application ID，不会把启动请求转交给已安装的旧版本。
   默认读取源码目录 config/，不会自动继承已安装版本的账号配置。
   未确认前不替换本机已安装的监控引擎；回归使用临时目录独立挂载。
 
 统一文件读写与兼容补丁：
-  核心依照策略与原文件状态处理，不维护 Git/SVN/Hg 等软件名称清单。
+  普通程序依照策略与文件状态处理；系统 Git 经实际可执行文件身份核验后使用原始字节。
   匹配策略的普通程序读取已支持的密文时得到明文，写回后仍为原 301 密文；
-  已有明文保持明文，新文件默认明文、可选加密。原子替换保留源文件自身的状态。
+  已有明文保持明文，新文件默认明文、可选加密。明文覆盖已有密文目标时保留目标加密。
   内存映射的内核回写使用打开句柄建立时的授权，普通请求仍核对实际调用者。
   监控目录内不排除子目录或文件类型；新建副本按新建格式设置处理，默认明文。
 
-  compat/ 只提供独立的只读显示转换，不再按软件名称选择特殊文件视图。
+  src/yt_client/compat/ 只提供独立的只读显示转换；原始 Git 传输在文件引擎中实现。
   Git 显示模块在监控启动及索引变化后后台注册本地显示规则，无需每次手工配置。
-  已有密文历史可通过只读显示转换查看；新增提交的内容由程序授权视图决定。
-  详细功能、命令和限制见 compat/USAGE.txt，不把核心通用读写测试当作全软件兼容。
+  密文历史与差异可通过只读显示转换查看，不改变暂存内容和对象；已有明文历史不会自动清理。
+  详细功能、命令和限制见 src/yt_client/compat/USAGE.txt，不把核心通用读写测试当作全软件兼容。
 
   源码统一读写回归（关闭兼容模块、临时挂载，不修改真实源码、不推送）：
     python3 tests/verify_uniform_io.py --repo /path/repo --path path/to/Encrypted.java --config-dir ~/.config/shit-encryption
@@ -219,7 +227,7 @@ config/ 中含本机当前策略，state/ 和外层归档中有日志和样本�
    XDG_DATA_HOME、XDG_STATE_HOME 的绝对路径同样绕过加解密。
 
 普通的 /mnt、/media 或 home 下未启用项目目录不会进入受限会话；需要访问时
-在“概览 → 自动监控模式”下添加，或从该目录直接执行命令行启动器。
+在“监控目录”页面添加，或从该目录直接执行命令行启动器。
 指向被排除目录的符号链接按实际目标保护。
 这些是本启动器隔离视图的规则，不是服务器端策略的全局更改。
 
@@ -232,8 +240,9 @@ config/ 中含本机当前策略，state/ 和外层归档中有日志和样本�
 保存后的密文用 Windows 原始算法独立解密并比对摘要，内容一致。
 
 边界：适配版只针对校验过的 x86_64 sgfs 版本及本服务器策略的 301 格式；
-监控目录内不按文件类型排除。重命名、跨目录替换、硬链接和 RENAME_EXCHANGE 采用系统语义，
-保留源文件原有状态。监控根目录不使用系统路径黑名单，也不预先要求读写权限；实际访问由系统权限检查。
+监控目录内不按文件类型排除。普通重命名、硬链接与 RENAME_EXCHANGE 保留源格式；
+受信明文源覆盖已有密文目标时进行加密副本替换。监控根目录不使用系统路径黑名单，
+也不预先要求读写权限；实际访问由系统权限检查。
 不同用户（含容器用户）的 UID、主组和附加组按请求处理，不再限制为监控用户或 root。
 自动监控运行后，普通应用通过原路径访问支持目录；命令行隔离模式仍需通过包装入口。
 

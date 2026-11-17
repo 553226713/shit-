@@ -4,8 +4,8 @@ import unittest
 from pathlib import Path
 from subprocess import CompletedProcess
 from unittest.mock import patch
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-import yt_config
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+from yt_client import yt_config
 
 class FirstRunTests(unittest.TestCase):
     def test_login_success_is_not_lost_when_log_grows(self):
@@ -16,7 +16,7 @@ class FirstRunTests(unittest.TestCase):
             def run(command, **kwargs):
                 (root / 'files/log/svchost.log').write_text('LoginEnd.\n' + 'subsequent events\n' * 2000)
                 return CompletedProcess(command, 124, b'', b'')
-            with patch('yt_config.shutil.which', return_value='/usr/bin/bwrap'), patch('windows_policy.prepare_bridge', return_value=root / 'bridge.so'), patch('yt_config.subprocess.run', side_effect=run):
+            with patch('yt_client.yt_config.shutil.which', return_value='/usr/bin/bwrap'), patch('yt_client.windows_policy.prepare_bridge', return_value=root / 'bridge.so'), patch('yt_client.yt_config.subprocess.run', side_effect=run):
                 yt_config.refresh_native_client(root, '127.0.0.1', 20)
             self.assertTrue((root / 'files/bin/sysinfo').is_dir())
 

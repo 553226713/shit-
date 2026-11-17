@@ -14,12 +14,14 @@ import tempfile
 import time
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT))
-from verify_git_roundtrip import broker, MAGIC
+sys.path.insert(0, str(ROOT / "src"))
+sys.path.insert(0, str(ROOT / 'tests/engine2'))
+from testing import broker
+from verify_git_roundtrip import MAGIC
 
 
 def verify(args):
-    import yt_config
+    from yt_client import yt_config
     yt_config.SETTINGS_PATH = args.config_dir / 'settings.json'
     yt_config.REMOTE_POLICY_PATH = args.config_dir / 'remote_policy.json'
     effective = yt_config.effective_config(yt_config.load_settings(), yt_config.load_remote_policy())
@@ -35,7 +37,7 @@ def verify(args):
         return subprocess.run([str(x) for x in command], cwd=cwd, env=env,
                               capture_output=True, check=True, timeout=30).stdout
 
-    raw = run('git', '-C', args.repo, 'show', 'HEAD:' + args.path)
+    raw = run('git', '-C', args.repo, 'show', args.ref + ':' + args.path)
     assert raw.startswith(MAGIC)
     results = {}
     with tempfile.TemporaryDirectory(prefix='shit-scope-vcs-') as temporary:
@@ -61,6 +63,7 @@ def verify(args):
         hg_work = project / 'hg-work'; hg_work.mkdir()
         run(hg, 'init', hg_work)
         (hg_work / 'Encrypted.java').write_bytes(raw)
+        raw_fd = os.open(project, os.O_RDONLY | os.O_DIRECTORY)
         process = subprocess.Popen(['sudo', '-n', sys.executable, str(Path(__file__).resolve()),
                                     '--broker', str(work), str(engine)])
         try:
@@ -100,6 +103,8 @@ def verify(args):
                 expected = plain + ('\n// ' + name + ' encrypted roundtrip\n').encode()
                 tmp = p.with_name('.Encrypted.java.tmp'); tmp.write_bytes(expected); tmp.replace(p)
                 assert p.read_bytes() == expected
+                with os.fdopen(os.open(str(p.relative_to(project)), os.O_RDONLY, dir_fd=raw_fd), 'rb') as backing:
+                    assert backing.read(1024) == raw[:1024]
                 if name == 'svn':
                     run(svn, 'commit', '-q', '-m', 'modified ciphertext', cwd=directory)
                     received = run(svn, 'cat', svn_server.as_uri() + '/Encrypted.java')
@@ -125,6 +130,7 @@ def verify(args):
                         assert run(sys.executable, '-W', 'ignore', script, 'cat', '-r', 'tip', 'Encrypted.java', cwd=directory) == received
                         results['mercurial_interpreter_options_and_hg_py'] = True
         finally:
+            os.close(raw_fd)
             (work / 'stop').touch()
             try: process.wait(timeout=20)
             finally: subprocess.run(['sudo', '-n', 'rm', '-rf', '--', str(work / 'monitor')], check=True)
@@ -143,6 +149,7 @@ if __name__ == '__main__':
         parser.add_argument('--engine', type=Path, required=True)
         parser.add_argument('--repo', type=Path, required=True)
         parser.add_argument('--path', required=True)
+        parser.add_argument('--ref', default='HEAD', help='Historical encrypted sample revision')
         parser.add_argument('--config-dir', type=Path, required=True)
         parser.add_argument('--output', type=Path, required=True)
         parser.add_argument('--require-ciphertext', action='store_true', help='Legacy expectation; incompatible with trusted plaintext VCS access')

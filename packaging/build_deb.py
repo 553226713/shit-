@@ -10,17 +10,13 @@ import sys
 import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(ROOT / 'src'))
 from engine2.build import build
-from windows_policy import NATIVE_SHA256
-from yt_config import discover_native_client
+from yt_client.windows_policy import NATIVE_SHA256
+from yt_client.yt_config import discover_native_client
 
 VERSION = (ROOT / 'VERSION').read_text(encoding='utf-8').strip()
 OUTPUT = ROOT / 'dist'
-MODULES = ['runtime_paths.py', 'yt_control.py', 'yt_config.py', 'system_tray.py',
-           'auto_mount.py', 'auto_service.py', 'namespace_view.py', 'broker_control.py',
-           'windows_policy.py', 'file_scope.py', 'error_log.py',
-           'compat_cli.py', 'mount_authorization.py']
 
 
 def write(path, content, mode=0o644):
@@ -40,12 +36,15 @@ def main():
         staging = Path(temporary)
         app = staging / 'usr/lib/shit-encryption'
         app.mkdir(parents=True)
-        for name in MODULES:
-            shutil.copy2(ROOT / name, app / name)
+        source = app / 'src'
+        source.mkdir()
+        shutil.copytree(ROOT / 'src/yt_client', source / 'yt_client',
+                        ignore=shutil.ignore_patterns('__pycache__', '*.py[cod]',
+                                                     'yt_run.py', 'policy_manager.py', 'USAGE.txt'))
+        (source / 'engine2').mkdir()
+        for name in ['__init__.py', 'artifacts.py']:
+            shutil.copy2(ROOT / 'src/engine2' / name, source / 'engine2' / name)
         shutil.copytree(ROOT / 'assets', app / 'assets')
-        (app/'engine2').mkdir()
-        shutil.copy2(ROOT/'engine2/artifacts.py',app/'engine2/artifacts.py')
-        shutil.copytree(ROOT / 'compat', app / 'compat', ignore=shutil.ignore_patterns('__pycache__'))
         write(app / 'packaged-runtime', VERSION + '\n')
         vendor = app / 'vendor'; vendor.mkdir()
         for name in ['cipher301.bin', 'manifest.json']:
@@ -69,7 +68,7 @@ def main():
                         libfuse_sha256=hashlib.sha256((vendor/'lib/libfuse3.so.4').read_bytes()).hexdigest())
         (vendor / 'manifest.json').write_text(json.dumps(manifest,indent=2)+'\n')
         subprocess.run(['g++', '-shared', '-fPIC', '-pthread', '-Wall', '-Wextra', '-Werror',
-                        str(ROOT / 'windows_policy.cpp'), '-o', str(vendor / 'windows-policy.so')], check=True)
+                        str(ROOT / 'src/native/windows_policy.cpp'), '-o', str(vendor / 'windows-policy.so')], check=True)
         subprocess.run(['strip','--strip-unneeded',str(vendor/'windows-policy.so')],check=True)
         native_bin = vendor / 'native-client/files/bin'; native_bin.mkdir(parents=True)
         shutil.copy2(native, native_bin / 'svchost')
@@ -84,18 +83,8 @@ def main():
         for name, module in [('shit-encryption-textconv', 'textconv'),
                              ('shit-encryption-git-display', 'git-configure')]:
             write(staging / 'usr/bin' / name,
-                  f'#!/bin/sh\nexec /usr/bin/python3 /usr/lib/shit-encryption/compat_cli.py {module} "$@"\n', 0o755)
-        desktop = '''[Desktop Entry]
-Type=Application
-Name=shit加密
-Comment=加密目录监控与服务器策略同步
-Exec=/usr/bin/shit-encryption
-Icon=ytsysconfig
-Terminal=false
-Categories=System;Security;
-StartupNotify=true
-StartupWMClass=com.yangtu.ytconfig.control
-'''
+                  f'#!/bin/sh\nexec /usr/bin/python3 -I -c \'import sys; sys.path.insert(0, "/usr/lib/shit-encryption/src"); from yt_client.cli.compat_cli import main; raise SystemExit(main())\' {module} "$@"\n', 0o755)
+        desktop = (ROOT / 'packaging/com.yangtu.ytconfig.control.desktop').read_text(encoding='utf-8')
         write(staging / 'usr/share/applications/com.yangtu.ytconfig.control.desktop', desktop)
         icon = staging / 'usr/share/icons/hicolor/scalable/apps/ytsysconfig.svg'
         icon.parent.mkdir(parents=True)
