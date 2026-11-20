@@ -1,4 +1,4 @@
-Engine 2 — local C++ FUSE engine (application version 1.0.15)
+Engine 2 — local C++ FUSE engine (application version 1.0.18)
 
 Source and installed builds use only this engine; the old engine, callback patcher and executable backups were deleted.
 The original vendor filesystem executable was replaced by a hash-verified 3861

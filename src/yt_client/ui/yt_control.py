@@ -241,6 +241,10 @@ class ClientWindow(Gtk.ApplicationWindow):
         self.auto_action = action_button("启用监控")
         self.auto_action.connect("clicked", lambda _button: self._toggle_auto_mode())
         actions.append(self.auto_action)
+        self.terminal_authorization_button = secondary_button("终端授权")
+        self.terminal_authorization_button.set_visible(yt_config.PACKAGED)
+        self.terminal_authorization_button.connect("clicked", lambda _button: self._open_terminal_authorization())
+        actions.append(self.terminal_authorization_button)
         self.monitor_details_button = secondary_button("查看原因")
         self.monitor_details_button.connect("clicked", lambda _button: self._show_monitor_details())
         actions.append(self.monitor_details_button)
@@ -512,6 +516,17 @@ class ClientWindow(Gtk.ApplicationWindow):
             self.status_dot.add_css_class("status-ready" if kind == "success" else "status-error" if kind == "error" else "status-busy")
         self.auto_action.set_label("停止监控" if active or status.get("state") == "activating" else "启用监控")
         self.auto_action.set_sensitive(not busy and (active or bool(self.effective["encryption"]["key"])))
+        has_key = bool(self.effective["encryption"]["key"])
+        self.terminal_authorization_button.set_sensitive(not active and has_key)
+        if active:
+            terminal_help = "监控服务已运行。"
+        elif not has_key:
+            terminal_help = "同步策略和密钥后可使用终端启动监控。"
+        elif status.get("authorization_required"):
+            terminal_help = "打开系统终端完成管理员授权并启动监控。"
+        else:
+            terminal_help = "使用已有授权从系统终端启动监控。"
+        self.terminal_authorization_button.set_tooltip_text(terminal_help)
         self.monitor_details_button.set_visible(kind in ("warning", "error"))
         self.configure_server_button.set_visible(not bool(self.effective["encryption"]["key"]))
         self.directories_page.update(self.effective, status, updating=busy)
@@ -798,7 +813,23 @@ class ClientWindow(Gtk.ApplicationWindow):
             self._start_monitor_when_ready = True
             self._run_auto_action(auto_service.start)
 
+    def _open_terminal_authorization(self) -> None:
+        command = auto_service.terminal_authorization_command()
+        try:
+            launcher = Gio.AppInfo.create_from_commandline(
+                command, "加密目录监控授权", Gio.AppInfoCreateFlags.NEEDS_TERMINAL,
+            )
+            if not launcher.launch([], self.get_display().get_app_launch_context()):
+                raise RuntimeError("找不到可用的桌面终端。")
+        except (GLib.Error, RuntimeError) as error:
+            self._show_error("无法打开授权终端", f"{error}\n请在本机终端执行：\n{command}")
+        else:
+            self._monitor_error = None
+            self.status_detail.set_text("请在终端完成管理员授权，客户端会随后尝试启动监控。")
+
     def _run_auto_action(self, action) -> None:
+        if self._auto_action_pending:
+            return
         self._auto_action_pending = True
         self._monitor_error = None
         self._auto_action_label = "正在停止监控" if action is auto_service.stop else "正在启动监控"

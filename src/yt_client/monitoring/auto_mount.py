@@ -495,7 +495,21 @@ def _run_broker() -> int:
         control.close()
 
 
+def packaged_broker_main() -> int:
+    arguments = sys.argv[1:]
+    if not arguments:
+        return run_broker()
+    if arguments == ["--authorize-only"] and PACKAGED:
+        from yt_client.monitoring.mount_authorization import remember
+        remember(UID)
+        return 0
+    return 2
+
+
 def main() -> int:
+    if sys.argv[1:] == ["--authorize-in-terminal"]:
+        from yt_client.monitoring.auto_service import authorize_in_terminal
+        return authorize_in_terminal()
     if "--stop-broker" in sys.argv[1:]:
         from yt_client.monitoring.broker_control import request_stop
         request_stop(STATE)
@@ -503,7 +517,11 @@ def main() -> int:
     if "--broker" in sys.argv[1:]:
         return run_broker()
     if PACKAGED:
-        os.execvp("pkexec", ["pkexec", str(ROOT / "mount-broker")])
+        from yt_client.monitoring.mount_authorization import authorized
+        if not authorized(os.getuid()):
+            print("尚未完成管理员授权，请从桌面客户端启用监控。", file=sys.stderr)
+            return 126
+        os.execv("/usr/bin/pkexec", ["/usr/bin/pkexec", "--disable-internal-agent", str(ROOT / "mount-broker")])
     try:
         effective, directories, _uid, _gid, _groups = prepare_runtime()
         if not directories:

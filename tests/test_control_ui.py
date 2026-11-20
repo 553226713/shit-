@@ -145,6 +145,26 @@ class WindowTests(unittest.TestCase):
         self.assertFalse(window.auto_running)
         window.destroy()
 
+    def test_packaged_terminal_authorization_stays_visible_in_all_service_states(self):
+        with patch.object(yt_config, 'PACKAGED', True):
+            window = ClientWindow(self.app)
+        try:
+            button = window.terminal_authorization_button
+            for active, authorization_required, key, sensitive in (
+                (False, True, 'test-key', True),
+                (False, False, 'test-key', True),
+                (True, False, 'test-key', False),
+                (False, True, '', False),
+            ):
+                with self.subTest(active=active, authorization_required=authorization_required, key=bool(key)):
+                    window.effective['encryption']['key'] = key
+                    window._service_status = {'active': active, 'authorization_required': authorization_required}
+                    window._render_monitor_status()
+                    self.assertTrue(button.get_visible())
+                    self.assertEqual(button.get_sensitive(), sensitive)
+        finally:
+            window.destroy()
+
 
 
 class SyncTests(unittest.TestCase):

@@ -1,4 +1,4 @@
-shit加密 1.0.15 安装说明
+shit加密 1.0.18 安装说明
 
 系统：x86_64 / amd64，Ubuntu 24.04 及更新版本的桌面环境。
 需要 GTK 4.10 以上、systemd 用户会话、/dev/fuse 和允许 bubblewrap 的用户命名空间。
@@ -6,7 +6,7 @@ shit加密 1.0.15 安装说明
 此包不能安装在 ARM、Ubuntu 22.04 或 Windows 上。
 
 安装（需要联网下载系统依赖）：
-  sudo apt install ./shit-encryption_1.0.15_amd64.deb
+  sudo apt install ./shit-encryption_1.0.18_amd64.deb
 
 从应用列表打开“shit加密”。首次使用：
 1. 在“服务器与策略”填写服务器地址，先点“应用配置”，再点“立即同步”。
@@ -27,7 +27,7 @@ shit加密 1.0.15 安装说明
 监控状态与临时策略：/run/shit-encryption/<用户UID>/，支持 /run 挂载为 noexec。
 无需修改 /run 的挂载选项，也无需安装开机 remount 服务。
 
-本安装包为 1.0.15，使用 C++ 并发文件引擎。
+本安装包为 1.0.18，使用 C++ 并发文件引擎。
 开发启动方式：linux-client/start.sh；核心统一按策略与原文件状态处理，src/yt_client/compat/ 仅提供只读显示转换。
 已加密文件在匹配程序中按明文读写，落盘保持原 301 格式；明文文件保持明文。
 概览中的“新建文件格式”可选明文或加密，切换即保存；以监控确认的“已生效”状态为准，未启动时显示待启用。
@@ -41,6 +41,16 @@ SVN/Hg 仍按普通授权规则访问。本次升级不自动加密已有明文�
 停止监控后卸载：
   sudo apt remove shit-encryption
 用户配置保留，不自动删除密钥、缓存或用户数据。
+
+1.0.18：“终端授权”固定显示在概览的监控操作区。监控已运行或未同步密钥时，按钮仍可见但不可点击。
+
+1.0.17：如果桌面密码框未出现，在概览点击“终端授权”。终端优先使用系统 sudo 认证；未安装 sudo 时使用 Polkit。
+授权通过后自动请求启动监控。如果界面无法打开终端，在本机终端以当前普通用户运行：
+  /usr/bin/python3 /usr/lib/shit-encryption/src/yt_client/monitoring/auto_mount.py --authorize-in-terminal
+
+1.0.16：首次启用监控时，由桌面程序向 Polkit 发起管理员授权，验证成功后再启动后台服务。
+如果桌面缺少 Polkit 认证代理，可在本机终端执行 pkexec /usr/lib/shit-encryption/mount-broker --authorize-only。
+启动与状态查询清理继承的 LD_PRELOAD、LD_LIBRARY_PATH 和 LD_AUDIT，避免第三方程序的加载器警告干扰。
 
 1.0.15：写入加密文件的明文视图时，若输入会形成内嵌密文头，引擎返回 EBADMSG，避免重复加密。
 分段写入也会检查。失败的复制可能留下空目标或已写入片段。

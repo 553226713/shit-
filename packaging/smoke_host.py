@@ -70,10 +70,15 @@ p.CONFIG_DIR=Path(sys.argv[2])/"config"
 p.STATE_DIR=Path(sys.argv[2])/"state"
 p.MONITOR_DIR=Path(sys.argv[3])
 from yt_client.monitoring import mount_authorization
-mount_authorization.DIRECTORY=Path(sys.argv[2])/"authorization-state/authorized-users"
+authorization_state = "terminal-authorization-state" if '--sudo-authorization' in sys.argv else "authorization-state"
+mount_authorization.DIRECTORY=Path(sys.argv[2])/authorization_state/"authorized-users"
 if '--stop-broker' in sys.argv:
     from yt_client.monitoring.broker_control import request_stop
     request_stop(p.MONITOR_DIR)
+elif '--authorize-only' in sys.argv:
+    from yt_client.monitoring.auto_mount import packaged_broker_main
+    sys.argv[:] = [sys.argv[0], '--authorize-only']
+    raise SystemExit(packaged_broker_main())
 else:
     from yt_client.monitoring.auto_mount import run_broker
     raise SystemExit(run_broker())
@@ -83,6 +88,16 @@ else:
             fd=os.open(name,os.O_RDONLY,dir_fd=raw_fd)
             with os.fdopen(fd,'rb') as stream:return stream.read()
         try:
+            privileged('env', f'PKEXEC_UID={os.getuid()}', '/usr/bin/python3', '-I', '-B',
+                       runner, app, base, runtime, '--authorize-only')
+            marker=base/'authorization-state/authorized-users'/str(os.getuid())
+            assert marker.is_file() and marker.stat().st_uid==0
+            privileged('env', '-u', 'PKEXEC_UID', '/usr/bin/python3', '-I', '-B',
+                       runner, app, base, runtime, '--authorize-only', '--sudo-authorization')
+            terminal_marker=base/'terminal-authorization-state/authorized-users'/str(os.getuid())
+            assert terminal_marker.is_file() and terminal_marker.stat().st_uid==0
+            assert not (runtime/'status.json').exists()
+            print('PASS: the packaged authorization helper records the calling account for pkexec and sudo without mounting')
             with shared_data_mount(project,denied), (base/'log').open('w') as log:
                 process=subprocess.Popen(['sudo','-n','env',f'PKEXEC_UID={os.getuid()}',
                     '/usr/bin/python3','-I','-B',str(runner),str(app),str(base),str(runtime)],
@@ -160,6 +175,7 @@ else:
         finally:
             os.close(raw_fd)
             privileged('rm','-rf','--',base/'authorization-state')
+            privileged('rm','-rf','--',base/'terminal-authorization-state')
 
 
 if __name__=='__main__':verify()

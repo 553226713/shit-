@@ -1,3 +1,3 @@
 #!/bin/sh
 # Only installed, root-owned Python modules may execute with privilege.
-exec /usr/bin/python3 -I -c 'import sys; sys.path.insert(0, "/usr/lib/shit-encryption/src"); from yt_client.monitoring.auto_mount import run_broker; raise SystemExit(run_broker())'
+exec /usr/bin/python3 -I -c 'import sys; sys.path.insert(0, "/usr/lib/shit-encryption/src"); from yt_client.monitoring.auto_mount import packaged_broker_main; raise SystemExit(packaged_broker_main())' "$@"

@@ -1,5 +1,6 @@
 #!/bin/sh
 set -eu
+unset LD_PRELOAD LD_LIBRARY_PATH LD_AUDIT
 export PYTHONPATH=/usr/lib/shit-encryption/src
 if [ "${1:-}" = "--foreground" ]; then
     shift
