@@ -139,8 +139,10 @@ def open_mount(
     gid: int,
     groups: list[int],
     executable: Path | None = None,
-    file_scope: dict | None = None,
+    excluded_directories: list[str] | None = None,
     policy_path: Path | None = None,
+    monitored_extensions: list[str] | None = None,
+    use_default_directory_exclusions: bool = True,
 ) -> Mount:
     digest = hashlib.sha256(str(origin).encode()).hexdigest()[:16]
     session = STATE / digest
@@ -194,7 +196,10 @@ def open_mount(
                 stdout=log_handle,
                 stderr=subprocess.STDOUT,
                 preexec_fn=credentials,
-                env=error_log.engine_environment(scope_environment(file_scope), uid, gid),
+                env=error_log.engine_environment(
+                    scope_environment(
+                        excluded_directories, origin, monitored_extensions or (),
+                        use_default_directory_exclusions=use_default_directory_exclusions), uid, gid),
             )
         except PermissionError as error:
             raise RuntimeError(f"无法执行加密引擎 {executable}：请检查安装目录的执行权限和挂载选项；{error}") from error
@@ -327,6 +332,11 @@ def _run_broker() -> int:
     mount_retry = {}
     retry_delay = {}
     mounted_at = {}
+    scope_options = {
+        "excluded_directories": effective.get("excluded_directories"),
+        "monitored_extensions": effective.get("monitored_extensions"),
+        "use_default_directory_exclusions": effective.get("use_default_directory_exclusions", True),
+    }
 
     def retry_mount(directory, reason):
         delay = min(retry_delay.get(directory, 0) * 2 or 1, 60)
@@ -355,8 +365,7 @@ def _run_broker() -> int:
                 stopping=True
                 break
             try:
-                mounts.append(open_mount(directory, uid, gid, groups,
-                                         file_scope=effective.get("file_scope")))
+                mounts.append(open_mount(directory, uid, gid, groups, **scope_options))
                 mounted_at[directory] = time.monotonic()
             except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as error:
                 retry_mount(directory, str(error))
@@ -406,8 +415,7 @@ def _run_broker() -> int:
                 if time.monotonic() < deadline:
                     continue
                 try:
-                    item = open_mount(directory, uid, gid, groups,
-                                      file_scope=effective.get("file_scope"))
+                    item = open_mount(directory, uid, gid, groups, **scope_options)
                 except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as error:
                     retry_mount(directory, str(error))
                     log.exception('Mount retry failed: path=%s', directory)
@@ -426,7 +434,12 @@ def _run_broker() -> int:
                 break
             if time.monotonic() >= compat_retry:
                 try:
-                    if compatibility is None:compatibility=GitPatches(uid,gid,groups,log)
+                    if compatibility is None:
+                        compatibility = GitPatches(
+                            uid, gid, groups, log,
+                            excluded_directories=scope_options["excluded_directories"] or (),
+                            use_default_directory_exclusions=scope_options["use_default_directory_exclusions"],
+                        )
                     if compatibility.tick([item.origin for item in mounts]):
                         write_status({'compatibility': compatibility.status()}, uid, gid)
                 except Exception as error:

@@ -6,7 +6,7 @@ from pathlib import Path
 import subprocess
 import sys
 
-from harness import ROOT, session
+from harness import ROOT, metrics, session
 
 MAGIC = bytes.fromhex('6e7e5a6d0089da16e3b351ea53aafb8bf665ef5aa662a08765f64e627500675c')
 
@@ -24,12 +24,14 @@ def synthetic_header():
 
 
 def verify(engine):
+    from yt_client.file_scope import DEFAULT_EXCLUDED_DIRECTORY_NAMES
+
     header = synthetic_header()
     def populate(project, binary):
         config = binary/'sgfs.conf'
         with config.open('a') as stream:
             stream.write('*java*==||==*.java\n')
-        for name in ('Atomic.java', 'Large.java', 'Legacy.java', 'Handle.java',
+        for name in ('Atomic.java', 'Protected.java', 'Large.java', 'Legacy.java', 'Handle.java',
                      *(f'Jvm{i}.java' for i in range(8))):
             (project/name).write_bytes(header)
         for folder in ('tmp', 'src/tmp', 'temp', 'attempt', 'node_modules', 'build', '.git', 'custom-cache'):
@@ -54,16 +56,34 @@ def verify(engine):
             assert path.read_bytes() == expected, path.name
         for folder in ('tmp', 'src/tmp', 'temp', 'attempt', 'node_modules', 'build', '.git', 'custom-cache'):
             path = project/folder/'Nested.java'
+            if any(part in DEFAULT_EXCLUDED_DIRECTORY_NAMES for part in Path(folder).parts):
+                before = metrics(project)['header_probes']
+                assert path.read_bytes() == header, folder
+                path.write_bytes(b'raw replacement')
+                assert disk(str(path.relative_to(project))) == b'raw replacement'
+                assert metrics(project)['header_probes'] == before, folder
+                continue
             assert path.read_bytes() == b'', folder
             expected = f'class Nested {{ /* {folder} */ }}\n'.encode()
             path.write_bytes(expected)
             check(path, expected)
-            for name in ('Unknown.custom', 'NoExtension'):
-                extra = project/folder/name
-                assert extra.read_bytes() == b'', str(extra)
-                extra.write_bytes(expected)
-                check(extra, expected)
-        results['all_subdirectories_and_file_types_decrypt'] = True
+            extra = project/folder/'Unknown.custom'
+            assert extra.read_bytes() == b'', str(extra)
+            extra.write_bytes(expected)
+            check(extra, expected)
+            assert (project/folder/'NoExtension').read_bytes() == header
+        results['configured_types_decrypt_inside_subdirectories'] = True
+        excluded_stage = project/'tmp/blocked.java'
+        excluded_stage.write_bytes(b'plain source')
+        try:
+            excluded_stage.replace(project/'Protected.java')
+        except PermissionError:
+            pass
+        else:
+            raise AssertionError('Excluded source replaced a monitored encrypted file')
+        assert disk('Protected.java') == header
+        assert excluded_stage.read_bytes() == b'plain source'
+        results['excluded_source_keeps_monitored_encrypted_target'] = True
         # Baseline atomic replacement with an existing destination.
         atomic = project/'Atomic.java'
         stage = project/'atomic-save.tmp'
@@ -131,15 +151,16 @@ def verify(engine):
         for index, suffix in enumerate(('~', '.tmp', '___jb_tmp___', '___jb_old___', '.anything')):
             source = left/f'source{index}'
             source.write_bytes(header)
-            before = source.stat().st_ino
+            before = os.stat(str(source.relative_to(project)), dir_fd=raw_fd).st_ino
             alias = left/f'alias{index}'
             os.link(source, alias)
             target = right/f'target{suffix}'
             target.write_bytes(b'old plaintext target')
             source.replace(target)
-            assert target.stat().st_ino == alias.stat().st_ino == before
+            assert os.stat(str(target.relative_to(project)), dir_fd=raw_fd).st_ino == before
+            assert disk(str(alias.relative_to(project))) == bytes(header)
             assert disk(str(target.relative_to(project))) == bytes(header)
-            assert target.read_bytes() == b''
+            assert target.read_bytes() == (b'' if suffix == '.tmp' else header)
         results['cross_directory_hardlinks_and_all_names_keep_source_inode'] = True
         import ctypes
         a, b = left/'exchange', right/'exchange'

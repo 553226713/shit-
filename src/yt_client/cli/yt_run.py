@@ -55,7 +55,9 @@ def prepare(policy, effective):
     source = yt_config.build_sgfs_conf(effective)
     policy['file_patterns'] = [effective['encryption']['file_pattern']]
     policy['supported_directories'] = effective['directories']
-    policy['file_scope'] = effective['file_scope']
+    policy['excluded_directories'] = effective['excluded_directories']
+    policy['use_default_directory_exclusions'] = effective['use_default_directory_exclusions']
+    policy['monitored_extensions'] = effective['monitored_extensions']
     return source
 
 

@@ -1,5 +1,6 @@
 """Exercise packaged runtime on disposable, root-owned shared data mounts."""
 from contextlib import contextmanager
+import errno
 import json
 import mmap
 import os
@@ -53,8 +54,12 @@ def verify():
         header[1019:]=b'[END]'
         raw=bytes(header)
         encrypted=project/'Encrypted.java';encrypted.write_bytes(raw)
+        excluded=project/'node_modules';excluded.mkdir()
+        (excluded/'Existing.java').write_bytes(raw)
         (config/'settings.json').write_text(json.dumps({
-            'encryption':{'key':key},'trusted_programs':['python3','python3.*'],
+            'encryption':{'key':key,'new_file_mode':'encrypted'},
+            'trusted_programs':['python3','python3.*'],
+            'monitored_extensions':['.java'],
             'directories':[{'path':str(p),'enabled':True} for p in [project,base/'missing',denied]]}))
         runner=base/'run.py'
         runner.write_text('''import sys
@@ -74,8 +79,8 @@ else:
     raise SystemExit(run_broker())
 ''')
         raw_fd=os.open(project,os.O_RDONLY|os.O_DIRECTORY)
-        def disk():
-            fd=os.open('Encrypted.java',os.O_RDONLY,dir_fd=raw_fd)
+        def disk(name='Encrypted.java'):
+            fd=os.open(name,os.O_RDONLY,dir_fd=raw_fd)
             with os.fdopen(fd,'rb') as stream:return stream.read()
         try:
             with shared_data_mount(project,denied), (base/'log').open('w') as log:
@@ -100,6 +105,21 @@ else:
                     file=project/'test.txt';file.write_text('package file access test')
                     assert file.read_text()=='package file access test'
                     file.write_text('updated file');assert file.read_text()=='updated file'
+                    assert disk('test.txt')==b'updated file'
+                    assert (excluded/'Existing.java').read_bytes()==raw
+                    (excluded/'New.java').write_bytes(b'data')
+                    assert disk('node_modules/New.java')==b'data'
+                    (project/'New.java').write_bytes(b'data')
+                    assert disk('New.java').startswith(raw[:32])
+                    print('PASS: packaged directory exclusions take priority over the file type allowlist')
+                    try:
+                        (project/'Duplicate.java').write_bytes((excluded/'Existing.java').read_bytes())
+                    except OSError as error:
+                        assert error.errno == errno.EBADMSG, error
+                        assert len(disk('Duplicate.java')) == 1024
+                    else:
+                        raise AssertionError('Packaged engine accepted a second encryption layer')
+                    print('PASS: packaged engine rejects a second encryption layer')
                     expected=subprocess.check_output([str(app/'vendor/ytfs-textconv')],input=raw[1024:])
                     assert encrypted.read_bytes()==expected
                     expected+=b'\n// packaged engine write\n';encrypted.write_bytes(expected)

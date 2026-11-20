@@ -106,7 +106,10 @@ def run_view(session, executable, policy, uid, gid, groups, home, cwd, command,
             [str(executable), str(backing), str(policy_path),
              str(fd), str(session / 'engine2-metrics.json')],
             cwd=backing, pass_fds=(fd,), stdout=log, stderr=subprocess.STDOUT,
-            env=error_log.engine_environment(scope_environment(policy.get('file_scope')), uid, gid),
+            env=error_log.engine_environment(scope_environment(
+                policy.get('excluded_directories'),
+                monitored_extensions=policy.get('monitored_extensions', ()),
+                use_default_directory_exclusions=policy.get('use_default_directory_exclusions', True)), uid, gid),
             preexec_fn=engine_credentials)
         os.close(fd)
         fd = None

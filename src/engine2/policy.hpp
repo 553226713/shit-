@@ -9,6 +9,7 @@
 #include <fcntl.h>
 #include <fnmatch.h>
 #include <fstream>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -37,11 +38,33 @@ class Policy {
         std::string program, file;
     };
     std::vector<Rule> rules_;
+    std::vector<std::string> excluded_directories_;
+    std::vector<std::string> excluded_directory_names_;
+    std::vector<std::string> monitored_extensions_;
 
   public:
     std::string key;
     bool encrypt_new = false;
-    explicit Policy(const std::string &config) {
+    explicit Policy(const std::string &config, const char *exclusions = nullptr,
+                    const char *extensions = nullptr, const char *excluded_names = nullptr) {
+        if (exclusions) {
+            std::istringstream directories(exclusions);
+            for (std::string directory; std::getline(directories, directory);)
+                if (directory.starts_with('/'))
+                    excluded_directories_.push_back(directory == "/" ? directory : directory + '/');
+        }
+        if (excluded_names) {
+            std::istringstream names(excluded_names);
+            for (std::string name; std::getline(names, name);)
+                if (!name.empty())
+                    excluded_directory_names_.push_back(name);
+        }
+        if (extensions) {
+            std::istringstream types(extensions);
+            for (std::string extension; std::getline(types, extension);)
+                if (extension.starts_with('.') && extension.size() > 1)
+                    monitored_extensions_.push_back(extension);
+        }
         std::ifstream in(config);
         if (!in)
             throw std::runtime_error("policy cannot be read");
@@ -62,6 +85,38 @@ class Policy {
         }
         if (key.empty() || key.size() >= 30 || key.find('\0') != key.npos)
             throw std::runtime_error("invalid policy identity");
+    }
+    bool excludes_directory(std::string_view path) const {
+        if (std::any_of(excluded_directories_.begin(), excluded_directories_.end(),
+                [&](const std::string &directory) { return path.starts_with(directory); }))
+            return true;
+        if (excluded_directory_names_.empty())
+            return false;
+        for (size_t start = 0, end; (end = path.find('/', start)) != path.npos; start = end + 1) {
+            auto component = path.substr(start, end - start);
+            if (std::find(excluded_directory_names_.begin(), excluded_directory_names_.end(),
+                    component) != excluded_directory_names_.end())
+                return true;
+        }
+        return false;
+    }
+    bool monitors_file(std::string_view path) const {
+        if (excludes_directory(path) || monitored_extensions_.empty())
+            return false;
+        auto name = path.substr(path.find_last_of('/') + 1);
+        return std::any_of(monitored_extensions_.begin(), monitored_extensions_.end(),
+            [&](const std::string &extension) {
+                return name.size() >= extension.size() &&
+                    std::equal(extension.rbegin(), extension.rend(), name.rbegin(),
+                        [](char expected, char actual) {
+                            if (actual >= 'A' && actual <= 'Z')
+                                actual += 'a' - 'A';
+                            return expected == actual;
+                        });
+            });
+    }
+    bool encrypts_new_file(std::string_view path) const {
+        return encrypt_new && monitors_file(path);
     }
     Identity identity(pid_t pid) const {
         Identity result;

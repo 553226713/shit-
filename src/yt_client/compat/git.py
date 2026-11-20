@@ -2,12 +2,16 @@
 import argparse
 import difflib
 import json
+import os
 from pathlib import Path
 import shlex
 import subprocess
 import sys
 
-from yt_client.file_scope import normalize_scope
+from yt_client.file_scope import (
+    DEFAULT_MONITORED_EXTENSIONS, excludes_directory, normalize_excluded_directories,
+    normalize_monitored_extensions,
+)
 from yt_client.compat.textconv import MAGIC
 from yt_client.runtime_paths import ROOT, PACKAGED
 from yt_client.yt_config import atomic_write, atomic_write_json
@@ -36,9 +40,11 @@ def quote_pattern(path):
     return result + '"'
 
 
-def encrypted_paths(repo, scope=None):
-    scope = normalize_scope(scope)
-    extensions = set(scope['included_extensions']) - BINARY_EXTENSIONS
+def encrypted_paths(repo, monitored_extensions=None, excluded_directories=(),
+                    use_default_directory_exclusions=False):
+    if monitored_extensions == ():
+        return []
+    extensions = tuple(extension.encode('ascii') for extension in monitored_extensions or ())
     entries = []
     for entry in git(repo, 'ls-files', '--stage', '-z').split(b'\0'):
         if not entry: continue
@@ -47,9 +53,10 @@ def encrypted_paths(repo, scope=None):
         name = path.decode('utf-8', 'surrogateescape')
         p = Path(name)
         if stage != b'0' or mode not in (b'100644', b'100755'): continue
-        if any(part in scope['excluded_directories'] for part in p.parts[:-1]): continue
+        if excludes_directory(repo / p.parent, repo, excluded_directories,
+                              use_default_directory_exclusions): continue
         if p.suffix.lower() in BINARY_EXTENSIONS: continue
-        if scope['included_extensions'] and p.suffix.lower() not in extensions and p.name not in scope['included_names']: continue
+        if extensions and not os.fsencode(p.name).lower().endswith(extensions): continue
         entries.append((name, oid))
     cache_path = Path(git(repo, 'rev-parse', '--path-format=absolute', '--git-path',
                           'info/shit-encryption-object-headers.json').decode().strip())
@@ -98,11 +105,18 @@ def enable(repo, command=None, config_dir=None):
             ['/usr/bin/python3', str(ROOT / 'src/yt_client/cli/compat_cli.py'), 'textconv'])
         if config_dir:
             command += ' ' + shlex.join(['--config-dir', str(config_dir)])
-    scope = None
+    monitored_extensions = None
+    excluded_directories = ()
+    use_default_directory_exclusions = False
     if config_dir:
         from yt_client.yt_config import read_json
-        scope = read_json(Path(config_dir)/'settings.json', {}).get('file_scope')
-    selected = encrypted_paths(repo, scope)
+        settings = read_json(Path(config_dir)/'settings.json', {})
+        monitored_extensions = (tuple(normalize_monitored_extensions(settings['monitored_extensions']))
+                                if 'monitored_extensions' in settings else DEFAULT_MONITORED_EXTENSIONS)
+        excluded_directories = normalize_excluded_directories(settings.get('excluded_directories'))
+        use_default_directory_exclusions = settings.get('use_default_directory_exclusions') is not False
+    selected = encrypted_paths(repo, monitored_extensions, excluded_directories,
+                               use_default_directory_exclusions)
     path = Path(git(repo, 'rev-parse', '--path-format=absolute', '--git-path', 'info/attributes').decode().strip())
     previous = path.read_text() if path.exists() else ''
     if (BEGIN in previous) != (END in previous): raise ValueError('Git 属性中的显示配置标记不完整')

@@ -7,7 +7,7 @@ import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from yt_client.file_scope import scope_environment
-from yt_client.compat.manager import GitPatches
+from yt_client.compat.manager import GitPatches, repositories
 from yt_client.compat.git import git
 from yt_client.compat.textconv import MAGIC
 from yt_client.compat.index_watch import IndexWatch
@@ -15,6 +15,14 @@ from unittest.mock import patch
 
 
 class CompatibilityTests(unittest.TestCase):
+    def test_repository_discovery_skips_excluded_subtrees(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for name in ('node_modules', 'custom', 'source'):
+                (root / name / 'repo' / '.git').mkdir(parents=True)
+            self.assertEqual(repositories([root], [str(root / 'custom')], True),
+                             [root / 'source/repo'])
+
     def test_process_view_overrides_are_not_forwarded(self):
         with patch.dict(os.environ, {'YT_COMPAT_RAW_CLIENTS': 'git',
                                     'YT_COMPAT_SCRIPT_CLIENTS': 'hg.py'}):
@@ -25,10 +33,12 @@ class CompatibilityTests(unittest.TestCase):
     def test_repository_patch_refreshes_on_index_change_without_touching_index(self):
         with tempfile.TemporaryDirectory() as tmp:
             repo=Path(tmp)/'repo';repo.mkdir()
+            config=Path(tmp)/'config';config.mkdir()
+            (config/'settings.json').write_text('{"monitored_extensions": [".java"]}')
             git(repo,'init','-q')
             (repo/'Existing.java').write_bytes(MAGIC+b'cipher sample one')
             git(repo,'add','Existing.java')
-            with (Path(tmp)/'compat.log').open('w') as log:
+            with (Path(tmp)/'compat.log').open('w') as log, patch('yt_client.compat.manager.CONFIG_DIR', config):
                 patcher=GitPatches(os.getuid(),os.getgid(),os.getgroups(),log)
                 try:
                     def refresh():

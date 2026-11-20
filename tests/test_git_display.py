@@ -70,7 +70,20 @@ class GitDisplayTests(unittest.TestCase):
             (repo/'Encrypted.custom').write_bytes(MAGIC+b'cipher sample')
             git(repo,'add','Encrypted.custom')
             first=enable(repo,'/first/location',config)
-            self.assertEqual(first['encrypted_text_files'],1)
+            self.assertEqual(first['encrypted_text_files'],0)
+            for directory in ('node_modules', 'local'):
+                (repo/directory).mkdir()
+                (repo/directory/'Encrypted.custom').write_bytes(MAGIC+b'cipher sample')
+            git(repo,'add','node_modules','local')
+            (config/'settings.json').write_text(json.dumps({
+                'monitored_extensions': ['.custom'],
+                'excluded_directories': [str(repo/'local')],
+            }))
+            self.assertEqual(enable(repo,'/first/location',config)['encrypted_text_files'],1)
+            (config/'settings.json').write_text(json.dumps({'monitored_extensions': []}))
+            filtered=enable(repo,'/first/location',config)
+            self.assertEqual(filtered['encrypted_text_files'],0)
+            self.assertIn(b'diff: unspecified',git(repo,'check-attr','diff','--','Encrypted.custom'))
             enable(repo,'/moved/location',config)
             self.assertEqual(git(repo,'config','--get','diff.shit-encryption.textconv'),b'/moved/location\n')
             git(repo,'config','diff.shit-encryption.textconv','/user/custom')

@@ -90,6 +90,8 @@ struct Storage {
     bool backing_write = false;
     unsigned passthrough_refs = 0;
 };
+// Separate kernel caches for different views of the same backing inode.
+enum FileView { ordinary_view, decoded_view, ciphertext_view, unmonitored_view, view_count };
 struct Node {
     int fd;
     dev_t device = 0;
@@ -101,7 +103,7 @@ struct Node {
     uint64_t refs = 0;
     std::string path;
     bool gc_queued = false;
-    int view = 0; // 0 ordinary, 1 decoded, 2 ciphertext: separate kernel caches.
+    FileView view = ordinary_view;
     std::shared_ptr<Storage> storage;
     Node(int f, fuse_ino_t i, std::string p) : fd(f), ino(i), path(std::move(p)) {}
     ~Node() {
@@ -141,7 +143,10 @@ struct Engine {
     bool passthrough = false, mmap = false;
     Counters stats;
     int fuse_fd = -1;
-    explicit Engine(const char *root, const char *config) : policy(config) {
+    explicit Engine(const char *root, const char *config)
+        : policy(config, std::getenv("YT_EXCLUDED_DIRS"),
+                 std::getenv("YT_MONITORED_EXTENSIONS"),
+                 std::getenv("YT_EXCLUDED_DIR_NAMES")) {
         int fd = open(root, O_PATH | O_DIRECTORY | O_CLOEXEC);
         if (fd < 0)
             throw std::runtime_error("backing directory cannot be opened");
@@ -243,7 +248,7 @@ struct Engine {
     }
     std::shared_ptr<Storage> storage(const struct stat &st) {
         std::lock_guard g(nodes_lock);
-        for (int view = 0; view < 3; view++) {
+        for (int view = 0; view < view_count; view++) {
             auto it = identity.find({st.st_dev, st.st_ino, view});
             if (it != identity.end())
                 return nodes.at(it->second)->storage;
@@ -269,7 +274,7 @@ struct Engine {
             return n;
         }
         // Another view may have arrived while the header was being inspected.
-        for (int view = 0; view < 3; view++) {
+        for (int view = 0; view < view_count; view++) {
             auto existing = identity.find({st.st_dev, st.st_ino, view});
             if (existing != identity.end()) {
                 candidate->storage = nodes.at(existing->second)->storage;
@@ -313,7 +318,7 @@ struct Engine {
     }
     void retire_inode(const struct stat &st) {
         std::lock_guard g(nodes_lock);
-        for (int view = 0; view < 3; view++) {
+        for (int view = 0; view < view_count; view++) {
             auto mapped = identity.find({st.st_dev, st.st_ino, view});
             if (mapped == identity.end())
                 continue;
@@ -360,7 +365,7 @@ struct Engine {
         return ::open(proc(n->fd).c_str(), flags | O_CLOEXEC);
     }
     int classify(const std::shared_ptr<Node> &n, const struct stat &st, int fd = -1) {
-        if (!S_ISREG(st.st_mode) || st.st_size < 32)
+        if (n->view == unmonitored_view || !S_ISREG(st.st_mode) || st.st_size < 32)
             return 0;
         std::lock_guard g(n->storage->cache);
         auto &a = n->storage->stamp;
@@ -403,6 +408,8 @@ struct Engine {
         n->storage->classified = false;
     }
     bool decoded(fuse_req_t req, const std::shared_ptr<Node> &n) {
+        if (n->view == unmonitored_view)
+            return false;
         auto id = policy.identity(fuse_req_ctx(req)->pid);
         return policy.trusted(id, path(n));
     }
@@ -413,7 +420,7 @@ struct Engine {
         int enc = classify(n, st);
         if (state)
             *state = enc;
-        if (enc == 1 && n->view == 1)
+        if (enc == 1 && n->view == decoded_view)
             st.st_size = std::max<off_t>(0, st.st_size - 1024);
         return 0;
     }
@@ -425,10 +432,12 @@ struct Engine {
         struct stat current{};
         if (fstatat(dir->fd, name, &current, AT_SYMLINK_NOFOLLOW))
             return errno;
+        bool monitored = policy.monitors_file(relative);
         {
             std::lock_guard g(nodes_lock);
             sweep();
-            auto found = identity.find({current.st_dev, current.st_ino, 0});
+            auto view = !monitored && S_ISREG(current.st_mode) ? unmonitored_view : ordinary_view;
+            auto found = identity.find({current.st_dev, current.st_ino, view});
             if (found != identity.end()) {
                 auto n = nodes.at(found->second);
                 std::lock_guard cache(n->storage->cache);
@@ -443,7 +452,8 @@ struct Engine {
                 // a descriptor just to report unchanged plaintext metadata.
                 // Keep the descriptor reopen path tied to this directory entry.
                 if (n->path == relative && !n->retired &&
-                    (!S_ISREG(current.st_mode) || current.st_size < 32 || unchanged_plain)) {
+                    (view == unmonitored_view || !S_ISREG(current.st_mode) ||
+                     current.st_size < 32 || unchanged_plain)) {
                     n->refs++;
                     entry = {};
                     entry.ino = n->ino;
@@ -469,9 +479,12 @@ struct Engine {
             return error;
         }
         auto candidate = std::make_shared<Node>(fd, 0, relative);
+        if (!monitored && S_ISREG(st.st_mode))
+            candidate->view = unmonitored_view;
         candidate->storage = storage(st);
         int enc = classify(candidate, st);
-        candidate->view = enc ? (decoded(req, candidate) ? 1 : 2) : 0;
+        if (enc)
+            candidate->view = decoded(req, candidate) ? decoded_view : ciphertext_view;
         auto n = add(candidate, st);
         entry = {};
         entry.ino = n->ino;
@@ -479,7 +492,7 @@ struct Engine {
         // The descriptor and stat above already describe this lookup. Repeating
         // fstat/classification here doubles metadata work during IDE scans.
         entry.attr = st;
-        if (enc == 1 && n->view == 1)
+        if (enc == 1 && n->view == decoded_view)
             entry.attr.st_size = std::max<off_t>(0, st.st_size - 1024);
         // Regular dentries must revalidate, including editor temporary
         // files: rename preservation can replace their backing inode when an
@@ -521,6 +534,8 @@ struct Engine {
 static Engine &engine(fuse_req_t r) { return *static_cast<Engine *>(fuse_req_userdata(r)); }
 static Handle *handle(fuse_file_info *fi) { return reinterpret_cast<Handle *>(fi->fh); }
 static bool authorized(fuse_req_t r, Handle *h) {
+    if (h->node->view == unmonitored_view)
+        return false;
     if (fuse_req_ctx(r)->pid == 0)
         return h->authorized;
     auto &e = engine(r);
@@ -624,6 +639,31 @@ static int write_all(int fd, const void *data, size_t size, off_t off) {
         done += n;
     }
     return 0;
+}
+static int check_encrypted_write_prefix(Engine &e, int fd, off_t stored_size,
+                                        const char *data, size_t size, size_t offset) {
+    if (offset >= MAGIC.size() || !size)
+        return 0;
+    auto overlap = std::min(size, MAGIC.size() - offset);
+    if (memcmp(data, MAGIC.data() + offset, overlap))
+        return 0;
+    if (overlap == MAGIC.size())
+        return EBADMSG;
+
+    // Reconstruct the resulting payload prefix for split or out-of-order writes.
+    auto existing = static_cast<size_t>(std::clamp<off_t>(stored_size - 1024, 0, MAGIC.size()));
+    if (std::max(existing, offset + overlap) < MAGIC.size())
+        return 0;
+    std::array<unsigned char, MAGIC.size()> prefix{};
+    ssize_t count;
+    do {
+        count = pread(fd, prefix.data(), existing, 1024);
+    } while (count < 0 && errno == EINTR);
+    if (count < 0 || static_cast<size_t>(count) != existing)
+        return count < 0 ? errno : EIO;
+    e.cipher.apply(prefix.data(), existing, 1024);
+    memcpy(prefix.data() + offset, data, overlap);
+    return prefix == MAGIC ? EBADMSG : 0;
 }
 static int extend(Engine &e, int fd, off_t end) {
     struct stat st{};
@@ -738,9 +778,11 @@ static int open_handle(fuse_req_t r, const std::shared_ptr<Node> &n, fuse_file_i
     h->node = n;
     h->append = fi->flags & O_APPEND;
     h->writable = (fi->flags & O_ACCMODE) != O_RDONLY;
-    auto id = e.policy.identity(fuse_req_ctx(r)->pid);
-    h->raw_git = id.raw_git;
-    h->authorized = e.policy.trusted(id, h->path);
+    if (n->view != unmonitored_view) {
+        auto id = e.policy.identity(fuse_req_ctx(r)->pid);
+        h->raw_git = id.raw_git;
+        h->authorized = e.policy.trusted(id, h->path);
+    }
     if (state) {
         if ((flags & O_ACCMODE) != O_RDONLY && !h->authorized && !h->raw_git)
             return EACCES;
@@ -877,6 +919,14 @@ static void write_file(fuse_req_t r, fuse_ino_t ino, const char *buf, size_t siz
         return;
     }
     if (decode) {
+        error = check_encrypted_write_prefix(e, h->fd, st.st_size, buf, size, off);
+        if (error) {
+            if (error == EBADMSG)
+                errors::report(error, fuse_req_ctx(r)->pid, fuse_req_ctx(r)->uid,
+                               "ciphertext cannot be written into a decrypted file view");
+            reply_error(r, error);
+            return;
+        }
         error = extend(e, h->fd, off);
         off += 1024;
         e.stats.cipher_writes++;
@@ -907,8 +957,10 @@ static void fsync(fuse_req_t r, fuse_ino_t ino, int data, fuse_file_info *fi) {
 static int creation_format(fuse_req_t r, const std::string &path, bool &encrypt) {
     auto &e = engine(r);
     encrypt = false;
+    if (!e.policy.encrypts_new_file(path))
+        return 0;
     auto id = e.policy.identity(fuse_req_ctx(r)->pid);
-    if (id.raw_git || !e.policy.encrypt_new)
+    if (id.raw_git)
         return 0;
     if (!e.policy.trusted(id, path))
         return EACCES;
@@ -1137,6 +1189,10 @@ static int encrypted_replacement(fuse_req_t r, int dir, const char *name, int de
     int target_state = signature(dest, target, header);
     if (!target_state)
         return 0;
+    // An excluded source is opaque. Preserve the protected destination without
+    // inspecting or transforming the excluded source bytes.
+    if (e.policy.excludes_directory(source_path))
+        return target_state < 0 ? -target_state : EACCES;
     int source_state = signature(dir, name, scratch);
     if (source_state > 0)
         return 0;
@@ -1241,7 +1297,7 @@ static void rename(fuse_req_t r, fuse_ino_t parent, const char *name, fuse_ino_t
     bool handled = false;
     int error = 0;
     if (!flags && source_known && target_known && S_ISREG(old_source.st_mode) &&
-        S_ISREG(old_target.st_mode) &&
+        S_ISREG(old_target.st_mode) && e.policy.monitors_file(newpath) &&
         (old_source.st_dev != old_target.st_dev || old_source.st_ino != old_target.st_ino)) {
         auto source_storage = e.storage(old_source), target_storage = e.storage(old_target);
         std::unique_lock source_lock(source_storage->data, std::defer_lock);

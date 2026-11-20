@@ -21,6 +21,7 @@ gi.require_version("Gdk", "4.0")
 from gi.repository import Gdk, Gio, GLib, Gtk, Pango  # noqa: E402
 
 from yt_client import yt_config  # noqa: E402
+from yt_client.file_scope import normalize_excluded_directories, normalize_monitored_extensions  # noqa: E402
 from yt_client.monitoring import auto_service  # noqa: E402
 from yt_client import error_log  # noqa: E402
 from yt_client.ui.system_tray import SystemTray  # noqa: E402
@@ -149,6 +150,9 @@ class ClientWindow(Gtk.ApplicationWindow):
             on_add=self._add_directory, on_toggle=self._set_directory_enabled,
             on_remove=self._remove_directory, on_retry=self._retry_directories,
             on_details=self._show_directory_details,
+            on_add_exclusion=self._add_exclusion, on_remove_exclusion=self._remove_exclusion,
+            on_toggle_default_exclusions=self._set_default_exclusions,
+            on_save_file_types=self._save_file_types,
         )
         self.programs_page = ProgramsPage(
             self._apply_program_rules, self._programs_changed, self._show_error,
@@ -450,6 +454,8 @@ class ClientWindow(Gtk.ApplicationWindow):
             text, kind = "已保存 · 监控更新失败", "error"
         elif self._monitor_refresh_pending or self._monitor_refresh_running:
             text, kind = "已保存 · 正在更新监控", "accent"
+        elif not self.effective.get("monitored_extensions"):
+            text, kind = "已保存 · 未配置监控文件类型", "neutral"
         elif not self.effective["encryption"]["key"]:
             text, kind = "已保存 · 等待加密密钥", "neutral"
         elif not status.get("active"):
@@ -590,6 +596,51 @@ class ClientWindow(Gtk.ApplicationWindow):
             candidate = copy.deepcopy(self.settings)
             candidate["directories"].append({"path": path, "enabled": True})
             self._save_settings(candidate, "目录已保存")
+
+    def _add_exclusion(self) -> None:
+        self._show_file_picker(
+            "选择要排除的子目录", Gtk.FileChooserAction.SELECT_FOLDER,
+            Path(self.effective["directories"][0]["path"]), self._exclusion_selected,
+        )
+
+    def _exclusion_selected(self, folder: Path) -> None:
+        try:
+            path = folder.resolve()
+            roots = [Path(item["path"]).resolve() for item in self.effective["directories"]]
+        except (OSError, RuntimeError) as error:
+            self._show_error("无法选择排除目录", str(error))
+            return
+        paths = normalize_excluded_directories([str(path)])
+        if not paths or not any(root in path.parents for root in roots):
+            self._show_error("无法选择排除目录", "请选择监控目录下的子目录。")
+            return
+        if paths[0] not in self.settings["excluded_directories"]:
+            candidate = copy.deepcopy(self.settings)
+            candidate["excluded_directories"].extend(paths)
+            self._save_settings(candidate, "排除目录已保存")
+
+    def _remove_exclusion(self, path: str) -> None:
+        candidate = copy.deepcopy(self.settings)
+        candidate["excluded_directories"].remove(path)
+        self._save_settings(candidate, "已移除排除目录")
+
+    def _set_default_exclusions(self, enabled: bool) -> bool:
+        candidate = copy.deepcopy(self.settings)
+        candidate["use_default_directory_exclusions"] = enabled
+        return self._save_settings(candidate, "默认排除目录设置已保存")
+
+    def _save_file_types(self, text: str) -> bool:
+        try:
+            extensions = normalize_monitored_extensions(text)
+        except ValueError as error:
+            self._show_error("文件类型无效", str(error))
+            return False
+        if extensions == self.settings["monitored_extensions"]:
+            self.status_detail.set_text("监控文件类型已保存")
+            return True
+        candidate = copy.deepcopy(self.settings)
+        candidate["monitored_extensions"] = extensions
+        return self._save_settings(candidate, "监控文件类型已保存")
 
     def _set_directory_enabled(self, path: str, enabled: bool) -> None:
         candidate = copy.deepcopy(self.settings)

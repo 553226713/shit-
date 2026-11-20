@@ -5,18 +5,20 @@ import subprocess
 import sys
 import time
 
-from yt_client.file_scope import DEFAULT_SCOPE
+from yt_client.file_scope import excludes_directory
 from yt_client.runtime_paths import ROOT, CONFIG_DIR
 from yt_client.compat.index_watch import IndexWatch, git_directory
 
 
-def repositories(roots):
+def repositories(roots, excluded_directories, use_default_directory_exclusions):
     found = []
-    excluded = set(DEFAULT_SCOPE['excluded_directories'])
     for root in roots:
-        queue = [(Path(root), 0)]
+        root = Path(root)
+        queue = [(root, 0)]
         while queue:
             path, depth = queue.pop()
+            if excludes_directory(path, root, excluded_directories, use_default_directory_exclusions):
+                continue
             try:
                 if (path / '.git').exists():
                     found.append(path)
@@ -24,7 +26,7 @@ def repositories(roots):
                 if depth >= 2: continue
                 with os.scandir(path) as items:
                     for item in items:
-                        if item.name not in excluded and item.is_dir(follow_symlinks=False):
+                        if item.is_dir(follow_symlinks=False):
                             queue.append((Path(item.path), depth+1))
             except OSError:
                 continue
@@ -42,8 +44,11 @@ def index_signature(repo):
 
 
 class GitPatches:
-    def __init__(self, uid, gid, groups, log):
+    def __init__(self, uid, gid, groups, log, excluded_directories=(),
+                 use_default_directory_exclusions=True):
         self.uid, self.gid, self.groups, self.log = uid, gid, groups, log
+        self.excluded_directories = excluded_directories
+        self.use_default_directory_exclusions = use_default_directory_exclusions
         self.known = []
         self.signatures = {}
         self.retry_after = {}
@@ -80,7 +85,7 @@ class GitPatches:
             changed = True
         if now >= self.next_discovery:
             previous = set(self.known)
-            self.known = repositories(roots)
+            self.known = repositories(roots, self.excluded_directories, self.use_default_directory_exclusions)
             self.dirty.update(set(self.known)-previous)
             self.watch.sync(self.known)
             self.next_discovery = now+30

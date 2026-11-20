@@ -47,8 +47,8 @@ def verify(args):
         engine = binary / 'ytfs-engine2'; shutil.copy2(args.engine, engine)
         (binary / 'sgfs.conf').write_text(yt_config.build_sgfs_conf(effective))
         (binary / 'sgfs.conf').chmod(0o600)
-        monitored = ['.git', '.svn', '.hg', 'node_modules', 'target', 'build', 'dist', '.cache', 'tmp', 'temp']
-        for name in monitored:
+        excluded = ['.git', '.svn', '.hg', 'node_modules', 'target', 'build', 'dist', '.cache', 'tmp', 'temp']
+        for name in excluded:
             p = project / 'nested' / name / 'Encrypted.java'
             p.parent.mkdir(parents=True, exist_ok=True); p.write_bytes(raw)
         for name in ['src/Encrypted.java', 'target-source/Encrypted.JAVA', '.idea/settings.java',
@@ -79,19 +79,19 @@ def verify(args):
             ordinary = work / 'ordinary.py'; ordinary.write_text(reader)
             assert run(sys.executable, ordinary, project / 'src/Encrypted.java', hg) == plain
             results['ordinary_python_with_hg_argument_still_decrypts'] = True
-            for name in monitored:
+            for name in excluded:
                 p = project / 'nested' / name / 'Encrypted.java'
-                assert p.read_bytes() == plain and p.stat().st_size == len(plain), name
+                assert p.read_bytes() == raw and p.stat().st_size == len(raw), name
                 p.write_bytes(b'ordinary cache bytes')
                 assert p.read_bytes() == b'ordinary cache bytes', name
-            results['all_monitored_subdirectory_read_write'] = monitored
+            results['default_excluded_subdirectory_raw_read_write'] = excluded
             for name in ['target-source/Encrypted.JAVA', '.idea/settings.java', '.vscode/settings.java', '.gitignore']:
                 assert (project / name).read_bytes() == plain, name
             assert (project / 'binary.jar').read_bytes() == plain
             assert (project / 'cache-alias/Encrypted.java').read_bytes() == b'ordinary cache bytes'
             late = project / 'created-after-mount/.svn/Encrypted.java'
             late.parent.mkdir(parents=True); late.write_bytes(raw)
-            assert late.read_bytes() == plain
+            assert late.read_bytes() == raw
             results['new_directories_symlinks_extensions_and_lookalikes'] = True
             run(svn, 'add', 'Encrypted.java', cwd=svn_work)
             run(svn, 'commit', '-q', '-m', 'initial trusted content', cwd=svn_work)

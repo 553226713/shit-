@@ -18,7 +18,8 @@ def mounted(work, executable):
     item = auto_mount.open_mount(
         work / 'project', uid, gid,
         os.getgrouplist(pwd.getpwuid(uid).pw_name, gid), executable,
-        policy_path=executable.parent/'sgfs.conf')
+        policy_path=executable.parent/'sgfs.conf',
+        monitored_extensions=['.java', '.custom', '.tmp', '.txt', '.bin', '.js', '.jar', '.gitignore', '.conf'])
     try:
         yield item.process
     finally:

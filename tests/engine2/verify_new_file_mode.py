@@ -1,5 +1,6 @@
 """Verify both new-file formats on disposable mounts, including the 301 header."""
 import argparse
+import errno
 import json
 import mmap
 import os
@@ -63,6 +64,32 @@ def verify(engine):
                 assert int.from_bytes(stored[65:69], 'little') == 0x03583860
                 assert stored[278:300] == b'2020.NewDriver-Pading\0'
                 assert stored[1019:1024] == b'[END]'
+                excluded = project/'node_modules'
+                excluded.mkdir()
+                raw_copy = excluded/'Single.java'
+                raw_copy.write_bytes(stored)
+                assert disk('node_modules/Single.java') == stored
+                for name, writes, rejected in [
+                    ('Whole.java', [], (0, stored)),
+                    ('Split.java', [(0, stored[:16])], (16, stored[16:])),
+                    ('OutOfOrder.java', [(16, stored[16:32])], (0, stored[:16])),
+                ]:
+                    target = project/name
+                    with target.open('w+b', buffering=0) as stream:
+                        for offset, data in writes:
+                            assert os.pwrite(stream.fileno(), data, offset) == len(data)
+                        before = disk(name)
+                        try:
+                            os.pwrite(stream.fileno(), rejected[1], rejected[0])
+                        except OSError as error:
+                            assert error.errno == errno.EBADMSG, error
+                        else:
+                            raise AssertionError(f'Accepted nested ciphertext in {name}')
+                        assert disk(name) == before
+                        stream.seek(0)
+                        replacement = b'normal plaintext write after rejection'
+                        assert stream.write(replacement) == len(replacement)
+                    check(target, replacement)
             with new.open('ab', buffering=0) as stream:
                 stream.write(b'append\n')
             expected += b'append\n'; check(new, expected)
@@ -76,7 +103,7 @@ def verify(engine):
             expected = b'/*' + expected[2:]; check(new, expected)
             folder = project/'tmp/node_modules/build'; folder.mkdir(parents=True)
             nested = folder/'NoExtension'; nested.write_bytes(b'all paths')
-            check(nested, b'all paths')
+            check(nested, b'all paths', encrypted=False)
             empty = project/'Empty.java'
             fd = os.open(empty, os.O_RDONLY | os.O_CREAT | os.O_EXCL, 0o600)
             assert os.read(fd, 1) == b''; os.close(fd)
@@ -106,7 +133,8 @@ def verify(engine):
                 backup = project/(cipher.name + backup_suffix)
                 stage.write_bytes(b'two-step cipher replacement')
                 cipher.rename(backup); stage.replace(cipher); backup.unlink()
-                check(cipher, b'two-step cipher replacement')
+                check(cipher, b'two-step cipher replacement',
+                      encrypted=mode == 'encrypted' and temporary == '.tmp')
             untrusted = project/'Untrusted.java'
             attempt = subprocess.run([str(binary/'untrusted-writer'), str(untrusted)],
                                      input=b'not trusted', capture_output=True, timeout=5)
@@ -131,8 +159,8 @@ def verify(engine):
                 subprocess.run(['java', '-cp', str(binary), 'EditorSaveProbe', str(project)], check=True, timeout=40)
                 for i in range(8):
                     path = project/f'Jvm{i}.java'
-                    check(path, (f'// 保存 {i}:7\n'.encode()) * 500)
-                    assert disk(path.name).startswith(MAGIC)
+                    # The probe ends with a two-step rename from an unlisted suffix.
+                    check(path, (f'// 保存 {i}:7\n'.encode()) * 500, encrypted=False)
             results[mode] = 'PASS create/read/write/append/truncate/mmap, nested dirs, permissions, source-preserving renames, uniform program authorization'
     print(json.dumps(results, ensure_ascii=False, indent=2))
 

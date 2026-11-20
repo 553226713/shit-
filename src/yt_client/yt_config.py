@@ -18,7 +18,10 @@ from pathlib import Path
 from typing import Any
 
 from yt_client.runtime_paths import ROOT, CONFIG_DIR, STATE_DIR, PACKAGED, HOME as USER_HOME
-from yt_client.file_scope import normalize_scope
+from yt_client.file_scope import (
+    DEFAULT_MONITORED_EXTENSIONS, normalize_excluded_directories,
+    normalize_monitored_extensions, normalize_scope,
+)
 SETTINGS_PATH = CONFIG_DIR / "settings.json"
 REMOTE_POLICY_PATH = CONFIG_DIR / "remote_policy.json"
 VIEW_POLICY_PATH = CONFIG_DIR / "global_view_policy.json"
@@ -162,6 +165,9 @@ def default_settings() -> dict[str, Any]:
         },
         "trusted_programs": legacy_programs or list(DEFAULT_TRUSTED_PROGRAMS),
         "file_scope": normalize_scope(),
+        "excluded_directories": [],
+        "use_default_directory_exclusions": True,
+        "monitored_extensions": list(DEFAULT_MONITORED_EXTENSIONS),
         "directories": directories,
         "programs": programs,
         "local_overrides": {
@@ -235,6 +241,10 @@ def normalize_settings(raw: dict[str, Any] | None) -> dict[str, Any]:
     if "trusted_programs" in raw:
         settings["trusted_programs"] = _string_list(raw.get("trusted_programs"))
     settings["file_scope"] = normalize_scope(raw.get("file_scope"))
+    settings["excluded_directories"] = normalize_excluded_directories(raw.get("excluded_directories"))
+    settings["use_default_directory_exclusions"] = raw.get("use_default_directory_exclusions") is not False
+    if "monitored_extensions" in raw:
+        settings["monitored_extensions"] = normalize_monitored_extensions(raw["monitored_extensions"])
 
     directories = []
     for item in raw.get("directories", []):
@@ -540,6 +550,9 @@ def effective_config(
         },
         "trusted_programs": trusted,
         "file_scope": normalize_scope(settings.get("file_scope")),
+        "excluded_directories": settings.get("excluded_directories", []),
+        "use_default_directory_exclusions": settings.get("use_default_directory_exclusions", True),
+        "monitored_extensions": settings.get("monitored_extensions", list(DEFAULT_MONITORED_EXTENSIONS)),
         "program_matches": program_matches,
         "directories": list(directories.values()),
         "remote_updated_at": remote["updated_at"] if remote else None,
@@ -576,6 +589,9 @@ def monitor_signature(effective: dict[str, Any]) -> tuple:
     return (
         build_sgfs_conf(effective) if effective["encryption"].get("key") else None,
         tuple(sorted(item["path"] for item in effective["directories"] if item.get("enabled"))),
+        tuple(effective.get("excluded_directories", [])),
+        effective.get("use_default_directory_exclusions", True),
+        tuple(effective.get("monitored_extensions", [])),
     )
 
 

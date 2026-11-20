@@ -1,4 +1,4 @@
-Engine 2 — local C++ FUSE engine (application version 1.0.13)
+Engine 2 — local C++ FUSE engine (application version 1.0.15)
 
 Source and installed builds use only this engine; the old engine, callback patcher and executable backups were deleted.
 The original vendor filesystem executable was replaced by a hash-verified 3861
@@ -23,9 +23,10 @@ streaming adapter; it contains no filesystem/mount code.
 
 Design:
 Plain files use kernel passthrough for data I/O whenever possible.
-Every file beneath a configured monitor root participates in signature checks;
-there are no directory-name, filename or extension exclusions. Saved legacy
-file_scope restrictions and YT_SCOPE_* variables do not exclude files.
+Excluded directory trees bypass signature checks and use raw I/O. Other
+regular files participate in signature checks only if their filename matches
+the configured extensions. The desktop client presets common source and script
+extensions. Encryption at creation additionally requires encrypted creation mode.
 Only a file with a matching signature enters the encrypted path.
 Signature classification is cached by inode size/mtime/ctime, never plaintext.
 Raw and decoded views use different FUSE inode IDs, preventing mmap cache mixing.
@@ -38,6 +39,8 @@ file and encrypts its I/O. Untrusted ordinary creators are denied in encrypted
 mode. System Git is inode-verified against protected root-owned executables and
 uses raw-byte transport, even under a wildcard trusted rule. Its own metadata and
 checkout writes bypass new-file encryption; executable names alone grant nothing.
+Writes to the decrypted view return EBADMSG if they would leave a ciphertext
+signature at the start of the decoded payload, including split writes.
 Trusted plaintext replacement over an existing encrypted regular file stages an
 encrypted copy with the original target header before replacing the name. Source
 hardlinks and already-open handles keep their original inode. Already-encrypted

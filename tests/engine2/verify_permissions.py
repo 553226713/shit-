@@ -136,7 +136,7 @@ def verify_program_policy():
             config.write_text(rules.replace('new_file_mode ==||== plain',
                                                          'new_file_mode ==||== ' + mode)
                               + '\n*/svn==||==*\n')
-            (project/'cipher').write_bytes(header)
+            (project/'cipher.java').write_bytes(header)
             subprocess.run(['cc', '-O2', '-Wall', '-Wextra', '-Werror',
                             str(ROOT/'tests/engine2/file_write_probe.c'), '-o', str(binary/'git')], check=True)
             shutil.copy2(binary/'git', binary/'svn')
@@ -147,11 +147,11 @@ def verify_program_policy():
             def stored(name):
                 with os.fdopen(os.open(name, os.O_RDONLY, dir_fd=raw_fd), 'rb') as stream:
                     return stream.read()
-            attempt = subprocess.run([str(binary/'git'), str(project/'cipher')],
+            attempt = subprocess.run([str(binary/'git'), str(project/'cipher.java')],
                                      input=b'forbidden', capture_output=True)
-            assert attempt.returncode != 0 and stored('cipher') == bytes(header)
+            assert attempt.returncode != 0 and stored('cipher.java') == bytes(header)
             for program, trusted in [('git', False), ('svn', True)]:
-                name = program + '-created'
+                name = program + '-created.java'
                 attempt = subprocess.run([str(binary/program), str(project/name)],
                                          input=b'configured program policy', capture_output=True)
                 if mode == 'encrypted' and not trusted:
@@ -160,13 +160,13 @@ def verify_program_policy():
                     assert attempt.returncode == 0, attempt.stderr
                     assert (project/name).read_bytes() == b'configured program policy'
                     assert stored(name).startswith(MAGIC) == (mode == 'encrypted')
-            source = project/'temporary'
+            source = project/'temporary.java'
             source.write_bytes(b'rename keeps creation mode')
-            source.replace(project/'cipher')
-            assert stored('cipher').startswith(MAGIC)
+            source.replace(project/'cipher.java')
+            assert stored('cipher.java').startswith(MAGIC)
             if mode == 'plain':
-                assert stored('cipher')[:1024] == header
-            assert (project/'cipher').read_bytes() == b'rename keeps creation mode'
+                assert stored('cipher.java')[:1024] == header
+            assert (project/'cipher.java').read_bytes() == b'rename keeps creation mode'
     print('PASS: program names grant no exemptions; both creation modes and ciphertext write protection work')
 
 

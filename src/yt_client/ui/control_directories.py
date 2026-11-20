@@ -12,6 +12,7 @@ import gi
 gi.require_version("Gtk", "4.0")
 from gi.repository import Gtk
 
+from yt_client.file_scope import DEFAULT_EXCLUDED_DIRECTORY_NAMES
 from yt_client.ui.control_widgets import (
     action_button,
     badge,
@@ -128,6 +129,10 @@ class DirectoriesPage(Gtk.Box):
         on_remove: Callable[[str], None],
         on_retry: Callable[[], None],
         on_details: Callable[[str, str], None],
+        on_add_exclusion: Callable[[], None],
+        on_remove_exclusion: Callable[[str], None],
+        on_toggle_default_exclusions: Callable[[bool], bool],
+        on_save_file_types: Callable[[str], bool],
     ) -> None:
         super().__init__(orientation=Gtk.Orientation.VERTICAL)
         self._on_add = on_add
@@ -135,6 +140,7 @@ class DirectoriesPage(Gtk.Box):
         self._on_remove = on_remove
         self._on_retry = on_retry
         self._on_details = on_details
+        self._on_remove_exclusion = on_remove_exclusion
         self._items: list[dict] = []
         self._states: list[tuple[str, str, str]] = []
         self._signature = None
@@ -142,6 +148,7 @@ class DirectoriesPage(Gtk.Box):
         self._filter = ""
         self._updating = False
         self._row_controls: list[tuple[Gtk.Widget, bool]] = []
+        self._exclusions: tuple[str, ...] | None = None
 
         scroll, content = page_frame()
         self.append(scroll)
@@ -187,6 +194,58 @@ class DirectoriesPage(Gtk.Box):
             "服务器目录由策略管理，不能在此切换启用状态。移除仅更改本机配置，不会删除文件；"
             "已移除的服务器目录可在服务器设置中恢复。", wrap=True,
         ))
+
+        exclusions = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
+        top = Gtk.Box(spacing=12)
+        title = Gtk.Label(label="排除目录", xalign=0, hexpand=True)
+        title.add_css_class("section-title")
+        top.append(title)
+        self.add_exclusion_button = secondary_button("添加排除目录")
+        self.add_exclusion_button.connect("clicked", lambda _button: on_add_exclusion())
+        top.append(self.add_exclusion_button)
+        exclusions.append(top)
+        exclusions.append(muted(
+            "排除目录及其下级目录不进入加解密流程。新建文件使用明文，已有密文按原始字节访问。",
+            wrap=True,
+        ))
+        self._updating_default_exclusions = False
+        self.default_exclusions_check = Gtk.CheckButton(label="排除常见依赖、构建和缓存目录")
+
+        def default_exclusions_toggled(check):
+            if not self._updating_default_exclusions and not on_toggle_default_exclusions(check.get_active()):
+                self._updating_default_exclusions = True
+                check.set_active(not check.get_active())
+                self._updating_default_exclusions = False
+
+        self.default_exclusions_check.connect("toggled", default_exclusions_toggled)
+        exclusions.append(self.default_exclusions_check)
+        default_names = Gtk.Expander(label="查看默认排除目录名")
+        default_names.set_child(muted("、".join(DEFAULT_EXCLUDED_DIRECTORY_NAMES), wrap=True))
+        exclusions.append(default_names)
+        self.exclusion_rows = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        exclusions.append(self.exclusion_rows)
+        content.append(card(exclusions))
+
+        file_types = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        title = Gtk.Label(label="监控文件类型", xalign=0)
+        title.add_css_class("section-title")
+        file_types.append(title)
+        file_types.append(muted(
+            "已预填常用文件类型。只监控列出的扩展名，不区分大小写。清空后不监控任何类型。"
+            "只有匹配类型、位于排除目录外的新文件，才按概览中的新建文件格式设置处理。",
+            wrap=True,
+        ))
+        type_row = Gtk.Box(spacing=12)
+        self.file_types_entry = Gtk.Entry(hexpand=True, placeholder_text=".java, .py, .d.ts")
+        self.file_types_entry.set_tooltip_text("用逗号或空格分隔扩展名")
+        self.file_types_value: tuple[str, ...] | None = None
+        self.save_file_types = secondary_button("保存类型")
+        self.file_types_entry.connect("activate", lambda _entry: self.save_file_types.emit("clicked"))
+        self.save_file_types.connect("clicked", lambda _button: on_save_file_types(self.file_types_entry.get_text()))
+        type_row.append(self.file_types_entry)
+        type_row.append(self.save_file_types)
+        file_types.append(type_row)
+        content.append(card(file_types))
         self.update({}, {})
 
     def update(self, effective: dict, service_status: dict, updating: bool = False) -> None:
@@ -208,6 +267,32 @@ class DirectoriesPage(Gtk.Box):
         )
         self._updating = bool(updating)
         self.add_button.set_sensitive(not self._updating)
+        self.add_exclusion_button.set_sensitive(bool(items) and not self._updating)
+        self.exclusion_rows.set_sensitive(not self._updating)
+        self.default_exclusions_check.set_sensitive(not self._updating)
+        self._updating_default_exclusions = True
+        self.default_exclusions_check.set_active(effective.get("use_default_directory_exclusions", True))
+        self._updating_default_exclusions = False
+        self.file_types_entry.set_sensitive(not self._updating)
+        self.save_file_types.set_sensitive(not self._updating)
+        file_types = tuple(effective.get("monitored_extensions", []))
+        if file_types != self.file_types_value:
+            self.file_types_value = file_types
+            self.file_types_entry.set_text(", ".join(file_types))
+        exclusions = tuple(effective.get("excluded_directories", []))
+        if exclusions != self._exclusions:
+            self._exclusions = exclusions
+            while child := self.exclusion_rows.get_first_child():
+                self.exclusion_rows.remove(child)
+            if not exclusions:
+                self.exclusion_rows.append(muted("尚未添加排除目录"))
+            for path in exclusions:
+                row = Gtk.Box(spacing=12)
+                row.append(path_label(path))
+                remove = secondary_button("移除")
+                remove.connect("clicked", lambda _button, p=path: self._on_remove_exclusion(p))
+                row.append(remove)
+                self.exclusion_rows.append(row)
         probe_interval = int(monotonic() // 5)
         if signature != self._signature:
             self._signature = signature
